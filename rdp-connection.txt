@@ -1,4 +1,4 @@
 Hostname: github-rdp-runner
-IP: 100.93.175.106
+IP: 100.79.242.115
 User: RDP
 Password: Tailscale@hts765
