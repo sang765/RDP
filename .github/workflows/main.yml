@@ -4,7 +4,10 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '50 */5 * * *'
-
+    
+permissions:
+  contents: write
+  
 jobs:
   secure-rdp:
     runs-on: windows-latest
