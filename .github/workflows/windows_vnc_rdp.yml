@@ -2,11 +2,7 @@ name: Windows VNC Remote Desktop
 run-name: Windows VNC Session by ${{ github.actor }}
 
 on:
-  workflow_dispatch: {}
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,10 +19,56 @@ jobs:
       uses: actions/checkout@v4.1.1
 
     - name: Mask sensitive values
+      shell: pwsh
       run: |
         echo "::add-mask::${{ secrets.VNC_PASSWORD }}"
         echo "::add-mask::${{ secrets.NGROK_AUTH_TOKEN }}"
         echo "::add-mask::${{ secrets.PAT }}"
+
+    - name: Get previous successful workflow run ID
+      id: get_previous_run
+      shell: pwsh
+      run: |
+        $url = "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=success&event=push&per_page=1"
+        $headers = @{
+          'Authorization' = "token ${{ secrets.PAT }}"
+          'Accept' = 'application/vnd.github.v3+json'
+        }
+        try {
+          $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+          if ($response.workflow_runs.Count -gt 0) {
+            $runId = $response.workflow_runs[0].id
+            Write-Output "Previous successful run ID: $runId"
+            Write-Output "::set-output name=prev_run_id::$runId"
+          } else {
+            Write-Output "No previous successful run found."
+            Write-Output "::set-output name=prev_run_id::0"
+          }
+        } catch {
+          Write-Output "Error fetching previous run: $($_.Exception.Message)"
+          Write-Output "::set-output name=prev_run_id::0"
+        }
+      env:
+        PAT: ${{ secrets.PAT }}
+
+    - name: Download backup from previous run
+      uses: actions/download-artifact@v4.1.1
+      with:
+        name: windows-backup
+        run-id: ${{ steps.get_previous_run.outputs.prev_run_id }}
+        path: C:\
+      continue-on-error: true
+
+    - name: Restore backup
+      shell: pwsh
+      run: |
+        if (Test-Path "C:\backup.zip") {
+          Expand-Archive -Path "C:\backup.zip" -DestinationPath "C:\" -Force
+          Remove-Item "C:\backup.zip" -Force
+          Write-Output "Backup restored successfully"
+        } else {
+          Write-Output "No backup found, starting fresh"
+        }
 
     - name: Create local admin user
       shell: pwsh
@@ -35,39 +77,46 @@ jobs:
         if ([string]::IsNullOrEmpty($username)) {
           $username = "githubrunner"
         }
-        $password = ConvertTo-SecureString "SecurePassword123!" -AsPlainText -Force
-        New-LocalUser -Name $username -Password $password -FullName "GitHub Runner" -Description "Temporary admin user for VNC"
-        Add-LocalGroupMember -Group "Administrators" -Member $username
-        Write-Output "Created user: $username"
-
-    - name: Restore backup from artifact
-      uses: actions/download-artifact@v4.1.4
-      with:
-        name: windows-backup
-        path: C:\
-      continue-on-error: true
+        
+        # Kiểm tra xem user đã tồn tại chưa
+        if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+          $password = ConvertTo-SecureString "SecurePassword123!" -AsPlainText -Force
+          New-LocalUser -Name $username -Password $password -FullName "GitHub Runner" -Description "Temporary admin user for VNC"
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Write-Output "Created user: $username"
+        } else {
+          Write-Output "User $username already exists"
+        }
 
     - name: Disable Windows Firewall
       shell: pwsh
       run: |
         Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
 
-    - name: Setup TigerVNC
+    - name: Install TigerVNC
       shell: pwsh
       run: |
-        Invoke-WebRequest -Uri "https://github.com/TigerVNC/tigervnc/releases/download/v1.13.1/vncviewer-1.13.1.exe" -OutFile "C:\vncviewer.exe"
-        Invoke-WebRequest -Uri "https://github.com/TigerVNC/tigervnc/releases/download/v1.13.1/vncserver-1.13.1.exe" -OutFile "C:\vncserver.exe"
-        Start-Process -FilePath "C:\vncserver.exe" -ArgumentList "/quiet /norestart" -Wait
+        Invoke-WebRequest -Uri "https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/tigervnc-64-1.13.1.exe/download" -OutFile "C:\tigervnc.exe"
+        Start-Process -FilePath "C:\tigervnc.exe" -ArgumentList "/quiet /norestart" -Wait
+        Start-Sleep -Seconds 10
 
-    - name: Set fixed VNC password
+    - name: Set VNC password
       shell: pwsh
       env:
         VNC_PASSWORD: "${{ secrets.VNC_PASSWORD }}"
       run: |
-        $passwordFile = "C:\vncpasswd.txt"
-        Write-Output "$env:VNC_PASSWORD" | Out-File -FilePath $passwordFile -Encoding ASCII
-        # Thiết lập password cho VNC server
-        # Lưu ý: Đây là phần cần được điều chỉnh theo cách TigerVNC lưu trữ password
+        # Tạo file password cho VNC
+        $vncPasswdPath = "C:\Program Files\TigerVNC\vncpasswd.exe"
+        if (Test-Path $vncPasswdPath) {
+          $tempPassFile = "C:\vncpass.txt"
+          echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII
+          echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII -Append
+          Get-Content $tempPassFile | & "$vncPasswdPath" -f
+          Remove-Item $tempPassFile -Force
+          Write-Output "VNC password set successfully"
+        } else {
+          Write-Error "VNC password utility not found"
+        }
 
     - name: Install Ngrok
       shell: pwsh
@@ -79,8 +128,15 @@ jobs:
     - name: Start TigerVNC Server
       shell: pwsh
       run: |
-        # Khởi động VNC server trên cổng 5900
-        Start-Process -FilePath "C:\vncserver.exe" -ArgumentList "-rfbport 5900 -rfbauth C:\vncpasswd.txt"
+        # Khởi động VNC server
+        $vncServerPath = "C:\Program Files\TigerVNC\vncserver.exe"
+        if (Test-Path $vncServerPath) {
+          Start-Process -FilePath $vncServerPath -ArgumentList "-service -install"
+          Start-Service -Name "tigervnc"
+          Write-Output "VNC server started successfully"
+        } else {
+          Write-Error "VNC server not found"
+        }
 
     - name: Expose VNC port with Ngrok
       shell: pwsh
@@ -88,33 +144,73 @@ jobs:
         NGROK_AUTH_TOKEN: "${{ secrets.NGROK_AUTH_TOKEN }}"
       run: |
         ngrok authtoken $env:NGROK_AUTH_TOKEN
-        Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900"
+        Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log stdout" -WindowStyle Hidden
 
     - name: Get Ngrok connection info
       shell: pwsh
       run: |
-        Start-Sleep -Seconds 5
-        $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels").Content | ConvertFrom-Json
-        $vncUrl = $ngrokInfo.tunnels[0].public_url
-        Write-Output "VNC Connection URL: $vncUrl"
-        Write-Output "VNC Password: ***"  # Password đã được mask
+        Start-Sleep -Seconds 10
+        try {
+          $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels").Content | ConvertFrom-Json
+          $vncUrl = $ngrokInfo.tunnels[0].public_url
+          $vncHost = $vncUrl -replace "tcp://", ""
+          $vncHost, $vncPort = $vncHost -split ":"
+          Write-Output "VNC Connection URL: $vncUrl"
+          Write-Output "VNC Host: $vncHost"
+          Write-Output "VNC Port: $vncPort"
+          Write-Output "VNC Password: ***"  # Password đã được mask
+          Write-Output "::set-output name=vnc_url::$vncUrl"
+          Write-Output "::set-output name=vnc_host::$vncHost"
+          Write-Output "::set-output name=vnc_port::$vncPort"
+        } catch {
+          Write-Output "Failed to get Ngrok connection info: $($_.Exception.Message)"
+        }
+      id: ngrok_info
+
+    - name: Display connection info
+      shell: pwsh
+      run: |
+        Write-Output "=== VNC CONNECTION INFORMATION ==="
+        Write-Output "Host: ${{ steps.ngrok_info.outputs.vnc_host }}"
+        Write-Output "Port: ${{ steps.ngrok_info.outputs.vnc_port }}"
+        Write-Output "Password: ***"  # Password đã được mask
+        Write-Output "URL: ${{ steps.ngrok_info.outputs.vnc_url }}"
+        Write-Output "=================================="
 
     - name: Keep alive for 6 hours
       shell: pwsh
       run: |
         Write-Output "Remote desktop will be available for 6 hours"
-        Start-Sleep -Seconds 21600  # 6 giờ
+        # Script keep-alive để duy trì kết nối
+        $keepAliveScript = @"
+        `$duration = 6 * 60 * 60  # 6 giờ
+        `$startTime = Get-Date
+        while (((Get-Date) - `$startTime).TotalSeconds -lt `$duration) {
+            Write-Output "Keeping alive... Time remaining: `$(`$duration - ((Get-Date) - `$startTime).TotalSeconds) seconds"
+            Start-Sleep -Seconds 300  # Sleep 5 phút
+        }
+        Write-Output "Keep-alive period completed"
+        "@
+        $keepAliveScript | Out-File -FilePath "C:\keep-alive.ps1" -Encoding UTF8
+        & "C:\keep-alive.ps1"
 
-    - name: Backup important folders
+    - name: Create backup
       shell: pwsh
       run: |
-        Compress-Archive -Path "$env:USERPROFILE\AppData", "$env:USERPROFILE\Downloads", "$env:USERPROFILE\Documents" -DestinationPath "C:\backup.zip"
+        $backupFolders = @(
+          "$env:USERPROFILE\AppData",
+          "$env:USERPROFILE\Documents", 
+          "$env:USERPROFILE\Downloads",
+          "$env:USERPROFILE\LocalAppData"
+        )
+        Compress-Archive -Path $backupFolders -DestinationPath "C:\backup.zip" -CompressionLevel Optimal
 
     - name: Upload backup to artifact
       uses: actions/upload-artifact@v4.3.1
       with:
         name: windows-backup
         path: C:\backup.zip
+        retention-days: 7
 
     - name: Trigger new workflow
       shell: pwsh
@@ -128,11 +224,23 @@ jobs:
         $body = @{
           ref = "main"
         } | ConvertTo-Json
-        Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/windows-vnc.yml/dispatches" -Method Post -Headers $headers -Body $body
+        try {
+          Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/windows-vnc.yml/dispatches" -Method Post -Headers $headers -Body $body
+          Write-Output "New workflow triggered successfully"
+        } catch {
+          Write-Output "Failed to trigger new workflow: $($_.Exception.Message)"
+        }
 
     - name: Cleanup
       shell: pwsh
       run: |
-        Get-Process | Where-Object { $_.Name -like "*vnc*" -or $_.Name -like "*ngrok*" } | Stop-Process -Force
-        Remove-Item -Path "C:\vncviewer.exe", "C:\vncserver.exe", "C:\ngrok.zip" -Force
-        Remove-Item -Path "C:\ngrok" -Recurse -Force
+        # Dừng các dịch vụ
+        Stop-Service -Name "tigervnc" -ErrorAction SilentlyContinue
+        Get-Process | Where-Object { $_.Name -like "*ngrok*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+        
+        # Xóa file tạm
+        Remove-Item -Path "C:\tigervnc.exe", "C:\ngrok.zip", "C:\backup.zip" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "C:\ngrok" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "C:\keep-alive.ps1" -Force -ErrorAction SilentlyContinue
+        
+        Write-Output "Cleanup completed"
