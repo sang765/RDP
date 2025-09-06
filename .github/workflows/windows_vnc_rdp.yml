@@ -1,2 +1,145 @@
+name: Windows VNC Remote Desktop
 
-
+on:
+  workflow_dispatch:  # Cho phép kích hoạt thủ công
+  schedule:
+    - cron: '0 0 * * *'  # Chạy hàng ngày (tùy chỉnh nếu cần)
+
+jobs:
+  setup-vnc-remote-desktop:
+    runs-on: windows-latest  # Sử dụng GitHub-hosted Windows runner
+    timeout-minutes: 360  # Tối đa 6 giờ (keep-alive)
+
+    steps:
+      # --- Bước 1: Checkout repository (sử dụng phiên bản mới nhất) ---
+      - name: Checkout repository
+        uses: actions/checkout@v4  # Phiên bản mới nhất tại thời điểm 2025-09-06 [citation:6][citation:7]
+
+      # --- Bước 2: Thiết lập local user với quyền Administrator ---
+      - name: Setup Local Admin User
+        env:
+          VNC_USER: ${{ secrets.VNC_USER || 'vncrunner' }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD || 'DefaultVNCPass123!' }}
+        run: |
+          $user = "$env:VNC_USER"
+          $password = "$env:VNC_PASSWORD"
+          # Tạo user nếu chưa tồn tại
+          $exist = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          if (-not $exist) {
+              Write-Host "Creating user $user..."
+              $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+              New-LocalUser -Name $user -Password $securePassword -FullName "VNC Runner" -Description "Temporary user for VNC access"
+              Add-LocalGroupMember -Group "Administrators" -Member $user
+              Write-Host "User $user created and added to Administrators group."
+          } else {
+              Write-Host "User $user already exists."
+          }
+
+      # --- Bước 3: Tắt Windows Firewall cho các kết nối nội bộ (để tránh chặn VNC) ---
+      - name: Disable Windows Firewall for Private Network
+        run: |
+          Set-NetFirewallProfile -Profile Private -Enabled False
+          Write-Host "Windows Firewall disabled for private network."
+
+      # --- Bước 4: Download và cài đặt TigerVNC Server ---
+      - name: Download and Install TigerVNC
+        run: |
+          $vncDir = "C:\tigervnc"
+          New-Item -Path $vncDir -ItemType Directory -Force
+          Invoke-WebRequest -Uri "https://github.com/TigerVNC/tigervnc/releases/download/v1.13.1/vncviewer-1.13.1.exe" -OutFile "$vncDir\vncviewer.exe"
+          Invoke-WebRequest -Uri "https://github.com/TigerVNC/tigervnc/releases/download/v1.13.1/vncserver-1.13.1.exe" -OutFile "$vncDir\vncserver.exe"
+          Write-Host "TigerVNC downloaded to $vncDir."
+
+      # --- Bước 5: Thiết lập VNC Password (cố định) ---
+      - name: Set VNC Password
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD || 'DefaultVNCPass123!' }}
+        run: |
+          $vncDir = "C:\tigervnc"
+          $password = "$env:VNC_PASSWORD"
+          # Chuyển password sang dạng mã hóa cho TigerVNC
+          cd $vncDir
+          .\vncserver.exe -service -install -password "$password"
+          Write-Host "VNC password set successfully."
+
+      # --- Bước 6: Khởi động TigerVNC Server ---
+      - name: Start TigerVNC Server
+        run: |
+          $vncDir = "C:\tigervnc"
+          cd $vncDir
+          Start-Process -FilePath ".\vncserver.exe" -ArgumentList "-service -start"
+          Write-Host "TigerVNC server started."
+
+      # --- Bước 7: Expose VNC Port qua Ngrok (để kết nối từ Internet) ---
+      - name: Expose VNC Port via Ngrok
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}  # Lấy token từ https://ngrok.com/docs/secure-tunnels/ngrok-agent/install (tạo tài khoản miễn phí)
+        run: |
+          # Download Ngrok
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive -Path "ngrok.zip" -DestinationPath "."
+          .\ngrok\ngrok.exe config add-authtoken $env:NGROK_AUTH_TOKEN
+          # Expose port 5900 (VNC default)
+          Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 5900" -WindowStyle Hidden
+          Write-Host "Ngrok started and exposed port 5900."
+
+      # --- Bước 8: Lấy thông tin kết nối VNC (Ngrok URL) ---
+      - name: Get VNC Connection Info
+        run: |
+          # Chờ ngrok khởi động và lấy URL
+          Start-Sleep -Seconds 10
+          $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue
+          $vncUrl = $ngrokInfo.tunnels[0].public_url
+          echo "VNC Connection URL: $vncUrl"
+          echo "VNC Password: Hidden on public repository!!!"
+          echo "VNC User: ${{ secrets.VNC_USER || 'vncrunner' }}"
+          # Ghi thông tin vào file để sử dụng trong các bước sau
+          echo "VNC_URL=$vncUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # --- Bước 9: Khởi tạo Backup Script (nếu chưa có) ---
+      - name: Initialize Backup Script
+        run: |
+          $backupScript = @"
+          `$backupDir = "C:\backup"
+          New-Item -Path `$backupDir -ItemType Directory -Force
+          `$folders = @("AppData", "LocalAppData", "Downloads", "Documents")
+          foreach (`$folder in `$folders) {
+              `$source = "C:\Users\${{ secrets.VNC_USER || 'vncrunner' }}\`$folder"
+              if (Test-Path `$source) {
+                  Compress-Archive -Path `$source -DestinationPath "`$backupDir/`$folder.zip" -Update
+              }
+          }
+          "@
+          $backupScript | Out-File -FilePath ".scripts\backup.ps1" -Encoding utf8
+
+      # --- Bước 10: Chạy Backup (nếu có dữ liệu cũ) ---
+      - name: Run Backup
+        run: |
+          if (Test-Path ".scripts\backup.ps1") {
+              .\.scripts\backup.ps1
+          }
+
+      # --- Bước 11: Upload Backup dưới dạng Artifact ---
+      - name: Upload Backup as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-backup
+          path: C:\backup\*.zip
+          retention-days: 1
+
+      # --- Bước 12: Keep-Alive (duy trì kết nối trong 6 giờ) ---
+      - name: Keep-Alive for 6 Hours
+        run: |
+          Write-Host "VNC Remote Desktop is running. Use URL: $env:VNC_URL"
+          Write-Host "This job will timeout after 6 hours."
+          # Giữ workflow chạy bằng cách chờ đợi
+          Start-Sleep -Seconds 21600  # 6 giờ
+
+      # --- Bước 13: Cleanup và Stop VNC Server ---
+      - name: Cleanup and Stop VNC Server
+        if: always()  # Chạy ngay cả khi lỗi
+        run: |
+          $vncDir = "C:\tigervnc"
+          .\ngrok\ngrok.exe kill  # Dừng ngrok
+          .$vncDir\vncserver.exe -service -stop  # Dừng VNC server
+          Write-Host "VNC server and ngrok stopped."
