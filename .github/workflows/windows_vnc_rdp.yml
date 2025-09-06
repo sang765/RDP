@@ -2,7 +2,11 @@ name: Windows VNC Remote Desktop
 run-name: Windows VNC Session by ${{ github.actor }}
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
@@ -39,14 +43,14 @@ jobs:
           if ($response.workflow_runs.Count -gt 0) {
             $runId = $response.workflow_runs[0].id
             Write-Output "Previous successful run ID: $runId"
-            Write-Output "::set-output name=prev_run_id::$runId"
+            echo "prev_run_id=$runId" >> $env:GITHUB_OUTPUT
           } else {
             Write-Output "No previous successful run found."
-            Write-Output "::set-output name=prev_run_id::0"
+            echo "prev_run_id=0" >> $env:GITHUB_OUTPUT
           }
         } catch {
           Write-Output "Error fetching previous run: $($_.Exception.Message)"
-          Write-Output "::set-output name=prev_run_id::0"
+          echo "prev_run_id=0" >> $env:GITHUB_OUTPUT
         }
       env:
         PAT: ${{ secrets.PAT }}
@@ -57,7 +61,7 @@ jobs:
         name: windows-backup
         run-id: ${{ steps.get_previous_run.outputs.prev_run_id }}
         path: C:\
-      continue-on-error: true
+      continue-on-error: true  # Cho phép bỏ qua lỗi nếu không có artifact
 
     - name: Restore backup
       shell: pwsh
@@ -78,7 +82,6 @@ jobs:
           $username = "githubrunner"
         }
         
-        # Kiểm tra xem user đã tồn tại chưa
         if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
           $password = ConvertTo-SecureString "SecurePassword123!" -AsPlainText -Force
           New-LocalUser -Name $username -Password $password -FullName "GitHub Runner" -Description "Temporary admin user for VNC"
@@ -105,7 +108,6 @@ jobs:
       env:
         VNC_PASSWORD: "${{ secrets.VNC_PASSWORD }}"
       run: |
-        # Tạo file password cho VNC
         $vncPasswdPath = "C:\Program Files\TigerVNC\vncpasswd.exe"
         if (Test-Path $vncPasswdPath) {
           $tempPassFile = "C:\vncpass.txt"
@@ -128,7 +130,6 @@ jobs:
     - name: Start TigerVNC Server
       shell: pwsh
       run: |
-        # Khởi động VNC server
         $vncServerPath = "C:\Program Files\TigerVNC\vncserver.exe"
         if (Test-Path $vncServerPath) {
           Start-Process -FilePath $vncServerPath -ArgumentList "-service -install"
@@ -158,10 +159,12 @@ jobs:
           Write-Output "VNC Connection URL: $vncUrl"
           Write-Output "VNC Host: $vncHost"
           Write-Output "VNC Port: $vncPort"
-          Write-Output "VNC Password: ***"  # Password đã được mask
-          Write-Output "::set-output name=vnc_url::$vncUrl"
-          Write-Output "::set-output name=vnc_host::$vncHost"
-          Write-Output "::set-output name=vnc_port::$vncPort"
+          Write-Output "VNC Password: ***"
+          
+          # Sử dụng syntax mới thay vì set-output
+          echo "vnc_url=$vncUrl" >> $env:GITHUB_OUTPUT
+          echo "vnc_host=$vncHost" >> $env:GITHUB_OUTPUT
+          echo "vnc_port=$vncPort" >> $env:GITHUB_OUTPUT
         } catch {
           Write-Output "Failed to get Ngrok connection info: $($_.Exception.Message)"
         }
@@ -173,7 +176,7 @@ jobs:
         Write-Output "=== VNC CONNECTION INFORMATION ==="
         Write-Output "Host: ${{ steps.ngrok_info.outputs.vnc_host }}"
         Write-Output "Port: ${{ steps.ngrok_info.outputs.vnc_port }}"
-        Write-Output "Password: ***"  # Password đã được mask
+        Write-Output "Password: ***"
         Write-Output "URL: ${{ steps.ngrok_info.outputs.vnc_url }}"
         Write-Output "=================================="
 
@@ -181,18 +184,13 @@ jobs:
       shell: pwsh
       run: |
         Write-Output "Remote desktop will be available for 6 hours"
-        # Script keep-alive để duy trì kết nối
-        $keepAliveScript = @"
-        `$duration = 6 * 60 * 60  # 6 giờ
-        `$startTime = Get-Date
-        while (((Get-Date) - `$startTime).TotalSeconds -lt `$duration) {
-            Write-Output "Keeping alive... Time remaining: `$(`$duration - ((Get-Date) - `$startTime).TotalSeconds) seconds"
+        $duration = 6 * 60 * 60  # 6 giờ
+        $startTime = Get-Date
+        while (((Get-Date) - $startTime).TotalSeconds -lt $duration) {
+            Write-Output "Keeping alive... Time remaining: $($duration - ((Get-Date) - $startTime).TotalSeconds) seconds"
             Start-Sleep -Seconds 300  # Sleep 5 phút
         }
         Write-Output "Keep-alive period completed"
-        "@
-        $keepAliveScript | Out-File -FilePath "C:\keep-alive.ps1" -Encoding UTF8
-        & "C:\keep-alive.ps1"
 
     - name: Create backup
       shell: pwsh
@@ -234,13 +232,10 @@ jobs:
     - name: Cleanup
       shell: pwsh
       run: |
-        # Dừng các dịch vụ
         Stop-Service -Name "tigervnc" -ErrorAction SilentlyContinue
         Get-Process | Where-Object { $_.Name -like "*ngrok*" } | Stop-Process -Force -ErrorAction SilentlyContinue
         
-        # Xóa file tạm
         Remove-Item -Path "C:\tigervnc.exe", "C:\ngrok.zip", "C:\backup.zip" -Force -ErrorAction SilentlyContinue
         Remove-Item -Path "C:\ngrok" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path "C:\keep-alive.ps1" -Force -ErrorAction SilentlyContinue
         
         Write-Output "Cleanup completed"
