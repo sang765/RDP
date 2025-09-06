@@ -2,8 +2,6 @@ name: RDP
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '50 */5 * * *'
     
 permissions:
   contents: write
