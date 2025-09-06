@@ -125,20 +125,48 @@ jobs:
     - name: Set VNC password
       shell: pwsh
       run: |
-        # Tạo file password cho VNC
-        $vncPasswdPath = "$env:ProgramFiles\TigerVNC\vncpasswd.exe"
-        if (Test-Path $vncPasswdPath) {
-          $tempPassFile = "C:\vncpass.txt"
-          # Tạo file với password (2 dòng giống nhau)
-          echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII
-          echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII -Append
-          
-          # Thiết lập password
-          Get-Content $tempPassFile | & "$vncPasswdPath" -f
-          Remove-Item $tempPassFile -Force
-          Write-Output "VNC password set successfully"
+        # Tìm đường dẫn chính xác của vncpasswd.exe
+        $vncPasswdPath = (Get-Command vncpasswd.exe -ErrorAction SilentlyContinue).Source
+        if (-not $vncPasswdPath) {
+            # Thử tìm trong các đường dẫn phổ biến
+            $possiblePaths = @(
+                "$env:ProgramFiles\TigerVNC\vncpasswd.exe",
+                "${env:ProgramFiles(x86)}\TigerVNC\vncpasswd.exe",
+                "$env:ProgramFiles\RealVNC\vncpasswd.exe",
+                "$env:LOCALAPPDATA\Programs\TigerVNC\vncpasswd.exe",
+                "C:\tools\TigerVNC\vncpasswd.exe"
+            )
+        
+            foreach ($path in $possiblePaths) {
+                if (Test-Path $path) {
+                    $vncPasswdPath = $path
+                    break
+                }
+            }
+        }
+    
+        if ($vncPasswdPath) {
+            Write-Output "Found vncpasswd at: $vncPasswdPath"
+        
+            # Tạo file password
+            $tempPassFile = "C:\vncpass.txt"
+            echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII
+            echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII -Append
+        
+            # Thiết lập password
+            Get-Content $tempPassFile | & "$vncPasswdPath" -f
+            Remove-Item $tempPassFile -Force
+            Write-Output "VNC password set successfully"
         } else {
-          Write-Error "VNC password utility not found at $vncPasswdPath"
+            Write-Error "VNC password utility not found. Please check TigerVNC installation."
+            # Thử cài đặt lại TigerVNC
+            choco install tigervnc -y --force
+            $vncPasswdPath = "$env:ProgramFiles\TigerVNC\vncpasswd.exe"
+            if (Test-Path $vncPasswdPath) {
+                Write-Output "TigerVNC reinstalled successfully"
+            } else {
+                Write-Error "Failed to install TigerVNC"
+            }
         }
 
     - name: Start TigerVNC Server
@@ -318,3 +346,4 @@ jobs:
         Remove-Item -Path "C:\backup.zip", "C:\keep-alive.ps1" -Force -ErrorAction SilentlyContinue
         
         Write-Output "Cleanup completed"
+
