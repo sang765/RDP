@@ -186,16 +186,35 @@ jobs:
         shell: pwsh
         run: |
           try {
-            $ngrokZip = "C:\ngrok.zip"
-            $ngrokDir = "C:\ngrok"
-            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip
-            Expand-Archive -Path $ngrokZip -DestinationPath $ngrokDir -Force
-            $env:Path += ";$ngrokDir"
-            [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$ngrokDir", "Machine")
-            Write-Output "Ngrok installed successfully"
+              $ngrokZip = "C:\ngrok.zip"
+              $ngrokDir = "C:\ngrok"
+              Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip
+              Expand-Archive -Path $ngrokZip -DestinationPath $ngrokDir -Force
+        
+              # Kiểm tra file đã giải nén
+              if (Test-Path "$ngrokDir\ngrok.exe") {
+                  Write-Output "Ngrok installed successfully at: $ngrokDir\ngrok.exe"
+              } else {
+                  Write-Error "Ngrok executable not found after extraction"
+                  exit 1
+              }
           } catch {
-            Write-Error "Failed to install Ngrok: $($_.Exception.Message)"
-            exit 1
+              Write-Error "Failed to install Ngrok: $($_.Exception.Message)"
+              exit 1
+          }
+          
+      - name: Verify Ngrok installation
+        shell: pwsh
+        run: |
+          $ngrokDir = "C:\ngrok"
+          if (Test-Path "$ngrokDir\ngrok.exe") {
+              Write-Output "✓ Ngrok executable found"
+              # Test chạy ngrok version
+              & "$ngrokDir\ngrok.exe" --version
+              Write-Output "✓ Ngrok version check passed"
+          } else {
+              Write-Error "✗ Ngrok executable not found"
+              exit 1
           }
 
       - name: Configure Ngrok
@@ -203,13 +222,25 @@ jobs:
         env:
           NGROK_AUTH_TOKEN: "${{ secrets.NGROK_AUTH_TOKEN }}"
         run: |
-          ngrok authtoken $env:NGROK_AUTH_TOKEN
-          Write-Output "Ngrok authtoken configured"
+          # Thêm đường dẫn ngrok vào PATH cho phiên hiện tại
+          $ngrokDir = "C:\ngrok"
+          $env:Path += ";$ngrokDir"
+    
+          # Kiểm tra ngrok có tồn tại không
+          if (Test-Path "$ngrokDir\ngrok.exe") {
+              Write-Output "Ngrok found at: $ngrokDir\ngrok.exe"
+              & "$ngrokDir\ngrok.exe" authtoken $env:NGROK_AUTH_TOKEN
+              Write-Output "Ngrok authtoken configured successfully"
+          } else {
+              Write-Error "Ngrok executable not found in $ngrokDir"
+              exit 1
+          }
 
       - name: Start Ngrok tunnel
         shell: pwsh
         run: |
-          Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+          $ngrokDir = "C:\ngrok"
+          Start-Process -FilePath "$ngrokDir\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
           Start-Sleep -Seconds 10
           Write-Output "Ngrok tunnel started"
 
