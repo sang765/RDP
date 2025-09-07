@@ -26,7 +26,6 @@ jobs:
       shell: pwsh
       run: |
         echo "::add-mask::${{ secrets.VNC_PASSWORD }}"
-        echo "::add-mask::${{ secrets.NGROK_AUTH_TOKEN }}"
         echo "::add-mask::${{ secrets.PAT }}"
 
     - name: Get previous successful workflow run ID
@@ -94,7 +93,7 @@ jobs:
       run: |
         Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
 
-    - name: Install TightVNC via Chocolatey
+    - name: Install TightVNC
       shell: pwsh
       run: |
         try {
@@ -104,20 +103,6 @@ jobs:
         } catch {
           Write-Error "Failed to install TightVNC: $($_.Exception.Message)"
           exit 1
-        }
-
-    - name: Install Ngrok via Winget
-      shell: pwsh
-      run: |
-        try {
-          # Thử cài đặt qua Winget trước
-          winget install Ngrok.Ngrok -s winget --accept-package-agreements --accept-source-agreements
-          Write-Output "Ngrok installed successfully via Winget"
-        } catch {
-          Write-Output "Winget installation failed, trying Chocolatey..."
-          # Nếu Winget thất bại, thử cài đặt qua Chocolatey
-          choco install ngrok -y
-          Write-Output "Ngrok installed successfully via Chocolatey"
         }
 
     - name: Set VNC password
@@ -151,11 +136,18 @@ jobs:
         if (Test-Path $vncServerPath) {
           # Cài đặt service
           & "$vncServerPath" -install -silent
-          Write-Output "TightVNC service installed successfully"
+          
+          # Cấu hình thêm để cho phép kết nối từ xa
+          & "$vncServerPath" -controlservice -sharedisplay 1
+          & "$vncServerPath" -controlservice -allowloopback 1
+          
+          Write-Output "TightVNC service installed and configured successfully"
         } else {
           $altPath = "${env:ProgramFiles(x86)}\TightVNC\tvnserver.exe"
           if (Test-Path $altPath) {
             & "$altPath" -install -silent
+            & "$altPath" -controlservice -sharedisplay 1
+            & "$altPath" -controlservice -allowloopback 1
             Write-Output "TightVNC service installed successfully from alternative path"
           } else {
             Write-Error "TightVNC not found"
@@ -168,73 +160,49 @@ jobs:
         # Khởi động TightVNC service
         try {
           Start-Service -Name "tvnserver"
+          # Chờ service khởi động hoàn toàn
+          Start-Sleep -Seconds 5
           Write-Output "TightVNC server started successfully"
         } catch {
           Write-Error "Failed to start TightVNC service: $($_.Exception.Message)"
         }
 
-    - name: Configure Ngrok
-      shell: pwsh
-      env:
-        NGROK_AUTH_TOKEN: "${{ secrets.NGROK_AUTH_TOKEN }}"
-      run: |
-        # Thiết lập auth token cho Ngrok
-        ngrok authtoken $env:NGROK_AUTH_TOKEN
-        Write-Output "Ngrok authtoken configured"
-
-    - name: Expose VNC port with Ngrok
+    - name: Get public IP information
       shell: pwsh
       run: |
-        # Khởi động Ngrok để expose cổng VNC (TightVNC mặc định dùng port 5900)
-        Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log stdout" -WindowStyle Hidden
-        Start-Sleep -Seconds 5  # Chờ Ngrok khởi động
-
-    - name: Get Ngrok connection info
-      shell: pwsh
-      run: |
-        # Lấy thông tin kết nối từ Ngrok
-        $maxRetries = 10
-        $retryCount = 0
-        $success = $false
-        
-        while (-not $success -and $retryCount -lt $maxRetries) {
-          try {
-            $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing).Content | ConvertFrom-Json
-            $vncUrl = $ngrokInfo.tunnels[0].public_url
-            $vncHost = $vncUrl -replace "tcp://", ""
-            $vncHost, $vncPort = $vncHost -split ":"
-            
-            Write-Output "VNC Connection URL: $vncUrl"
-            Write-Output "VNC Host: $vncHost"
-            Write-Output "VNC Port: $vncPort"
-            Write-Output "VNC Password: ***"  # Password đã được mask
-            
-            echo "vnc_url=$vncUrl" >> $env:GITHUB_OUTPUT
-            echo "vnc_host=$vncHost" >> $env:GITHUB_OUTPUT
-            echo "vnc_port=$vncPort" >> $env:GITHUB_OUTPUT
-            
-            $success = $true
-          } catch {
-            $retryCount++
-            Write-Output "Attempt $retryCount failed: $($_.Exception.Message)"
-            Start-Sleep -Seconds 5
-          }
+        # Lấy thông tin IP public của runner
+        try {
+          $publicIP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing).Content
+          Write-Output "Public IP: $publicIP"
+          echo "public_ip=$publicIP" >> $env:GITHUB_OUTPUT
+        } catch {
+          Write-Output "Could not retrieve public IP"
+          echo "public_ip=unknown" >> $env:GITHUB_OUTPUT
         }
         
-        if (-not $success) {
-          Write-Error "Failed to get Ngrok connection info after $maxRetries attempts"
+        # Kiểm tra xem VNC server có đang lắng nghe trên port 5900 không
+        $vncListening = (Get-NetTCPConnection -LocalPort 5900 -ErrorAction SilentlyContinue) -ne $null
+        if ($vncListening) {
+          Write-Output "VNC server is listening on port 5900"
+          echo "vnc_ready=true" >> $env:GITHUB_OUTPUT
+        } else {
+          Write-Output "VNC server is not listening on port 5900"
+          echo "vnc_ready=false" >> $env:GITHUB_OUTPUT
         }
-      id: ngrok_info
+      id: network_info
 
     - name: Display connection info
       shell: pwsh
       run: |
         Write-Output "=== VNC CONNECTION INFORMATION ==="
-        Write-Output "Host: ${{ steps.ngrok_info.outputs.vnc_host }}"
-        Write-Output "Port: ${{ steps.ngrok_info.outputs.vnc_port }}"
+        Write-Output "Host: ${{ steps.network_info.outputs.public_ip }}"
+        Write-Output "Port: 5900"
         Write-Output "Password: ***"  # Password đã được mask
-        Write-Output "URL: ${{ steps.ngrok_info.outputs.vnc_url }}"
+        Write-Output "Username: ${{ env.WINDOWS_USER }}"
         Write-Output "=================================="
+        Write-Output ""
+        Write-Output "Note: Connection may be blocked by GitHub's network firewall"
+        Write-Output "Recommended: Use a VNC client that supports SSH tunneling"
 
     - name: Keep alive for 6 hours
       shell: pwsh
@@ -267,17 +235,6 @@ jobs:
                 }
             }
             
-            # Kiểm tra và khởi động lại Ngrok nếu cần
-            `$ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
-            if (-not `$ngrokProcess) {
-                try {
-                    Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log stdout" -WindowStyle Hidden
-                    Write-Output "Restarted Ngrok process"
-                } catch {
-                    Write-Output "Failed to restart Ngrok process: `$(`$_.Exception.Message)"
-                }
-            }
-            
             Start-Sleep -Seconds `$checkInterval
         }
         
@@ -305,31 +262,11 @@ jobs:
         path: C:\backup.zip
         retention-days: 7
 
-    - name: Trigger new workflow
-      shell: pwsh
-      env:
-        PAT: "${{ secrets.PAT }}"
-      run: |
-        $headers = @{
-          Authorization = "token $env:PAT"
-          Accept = "application/vnd.github.v3+json"
-        }
-        $body = @{
-          ref = "main"
-        } | ConvertTo-Json
-        try {
-          Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/windows-vnc.yml/dispatches" -Method Post -Headers $headers -Body $body
-          Write-Output "New workflow triggered successfully"
-        } catch {
-          Write-Output "Failed to trigger new workflow: $($_.Exception.Message)"
-        }
-
     - name: Cleanup
       shell: pwsh
       run: |
         # Dừng các dịch vụ
         Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-        Get-Process | Where-Object { $_.Name -like "*ngrok*" } | Stop-Process -Force -ErrorAction SilentlyContinue
         
         # Xóa file tạm
         Remove-Item -Path "C:\backup.zip", "C:\keep-alive.ps1" -Force -ErrorAction SilentlyContinue
