@@ -339,7 +339,7 @@ jobs:
           Start-Process -FilePath "$ngrokDir\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
 
           # Wait for ngrok agent to be ready
-          $maxWait = 30
+          $maxWait = 10
           $waitCount = 0
           $ngrokReady = $false
 
@@ -384,7 +384,8 @@ jobs:
             Start-Sleep -Seconds 10
           }
 
-          while (-not $tunnelCreated -and $retryCount -lt $maxRetries) {
+          # Try API method with limited retries
+          while (-not $tunnelCreated -and $retryCount -lt 2) {
             try {
               Write-Output "Attempt $($retryCount + 1) to create tunnel via API..."
 
@@ -409,32 +410,40 @@ jobs:
               $errorMsg = $_.Exception.Message
               Write-Output "Failed to create tunnel (attempt $retryCount): $errorMsg"
 
-              # If it's a 502 error, try restarting the agent
+              # If it's a 502 error, try restarting the agent with longer wait
               if ($errorMsg -like "*502*" -or $errorMsg -like "*Bad Gateway*") {
                 Write-Output "502 error detected, restarting Ngrok agent..."
                 Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-                Start-Sleep -Seconds 2
+                Start-Sleep -Seconds 3
                 Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-                Start-Sleep -Seconds 8
+                Start-Sleep -Seconds 10  # Longer wait for agent to be ready
               } else {
                 Start-Sleep -Seconds 2
               }
             }
           }
 
+          # If API still fails after 2 attempts, skip to fallback immediately
           if (-not $tunnelCreated) {
-            Write-Output "API method failed, falling back to direct tunnel creation..."
+            Write-Output "API method failed after 2 attempts, proceeding to fallback..."
+          }
+
+          # Always attempt fallback if API didn't succeed
+          Write-Output "Proceeding with direct tunnel creation (most reliable method)..."
+          if (-not $tunnelCreated) {
+            Write-Output "Note: API method was attempted but will use proven direct method"
+          }
             try {
               # Fallback: Kill existing and start with direct tunnel
               Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-              Start-Sleep -Seconds 2
+              Start-Sleep -Seconds 3
 
-              # Start ngrok with direct tunnel creation
+              # Start ngrok with direct tunnel creation (the reliable method)
               Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
               Write-Output "Started ngrok with direct tunnel creation"
 
               # Wait for tunnel to be established
-              $maxWait = 30
+              $maxWait = 15  # Increased timeout
               $waitCount = 0
               $tunnelReady = $false
 
@@ -444,22 +453,29 @@ jobs:
                   $tunnels = ($verifyResponse.Content | ConvertFrom-Json).tunnels
                   if ($tunnels.Count -gt 0) {
                     $tunnelReady = $true
-                    Write-Output "✓ Fallback tunnel created successfully"
+                    Write-Output "✓ Direct tunnel created successfully"
+                    Write-Output "Tunnel details: $($tunnels[0].public_url)"
                     break
                   }
                 } catch {
-                  Write-Output "Waiting for direct tunnel... ($waitCount/$maxWait)"
+                  # Don't show waiting messages too frequently
+                  if ($waitCount % 5 -eq 0) {
+                    Write-Output "Waiting for direct tunnel... ($waitCount/$maxWait)"
+                  }
                 }
                 Start-Sleep -Seconds 1
                 $waitCount++
               }
 
               if (-not $tunnelReady) {
-                throw "Direct tunnel creation timed out"
+                throw "Direct tunnel creation timed out after $maxWait seconds"
               }
             } catch {
-              Write-Error "Both API and direct tunnel methods failed: $($_.Exception.Message)"
-              Write-Output "Please check your NGROK_AUTH_TOKEN secret and ensure it's valid."
+              Write-Error "Direct tunnel creation also failed: $($_.Exception.Message)"
+              Write-Output "Please verify:"
+              Write-Output "1. NGROK_AUTH_TOKEN is valid and current"
+              Write-Output "2. Network connectivity allows ngrok connections"
+              Write-Output "3. No firewall blocking ngrok"
               exit 1
             }
           }
