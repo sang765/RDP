@@ -285,21 +285,21 @@ jobs:
           Write-Output "=================================="
           
           $connectionGuide = @"
-# Hướng dẫn kết nối VNC
+          # Hướng dẫn kết nối VNC
 
-## Thông tin kết nối:
-${{ steps.connection_info.outputs.vnc_url }}
+          ## Thông tin kết nối:
+          ${{ steps.connection_info.outputs.vnc_url }}
 
-## Hướng dẫn RealVNC:
-1. Mở RealVNC Viewer
-2. Nhập địa chỉ: ${{ steps.connection_info.outputs.vnc_url }}
-3. Nhập password khi được yêu cầu
-4. Username: ${{ env.WINDOWS_USER }}
+          ## Hướng dẫn RealVNC:
+          1. Mở RealVNC Viewer
+          2. Nhập địa chỉ: ${{ steps.connection_info.outputs.vnc_url }}
+          3. Nhập password khi được yêu cầu
+          4. Username: ${{ env.WINDOWS_USER }}
 
-## Lưu ý:
-- Kết nối sẽ tự động đóng sau 6 giờ
-- Dữ liệu sẽ được backup tự động
-"@
+          ## Lưu ý:
+          - Kết nối sẽ tự động đóng sau 6 giờ
+          - Dữ liệu sẽ được backup tự động
+          "@
           
           $connectionGuide | Out-File -FilePath "C:\connection_guide.txt" -Encoding UTF8
 
@@ -358,7 +358,7 @@ ${{ steps.connection_info.outputs.vnc_url }}
           }
           
           Write-Output "Session completed"
-"@
+          "@
           
           $keepAliveScript | Out-File -FilePath "C:\keep-alive.ps1" -Encoding UTF8
           & "C:\keep-alive.ps1"
