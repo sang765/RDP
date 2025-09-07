@@ -19,256 +19,376 @@ jobs:
     timeout-minutes: 420  # 7 giờ để bao gồm cả thời gian backup
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4.1.1
+      - name: Checkout repository
+        uses: actions/checkout@v4.1.1
 
-    - name: Mask sensitive values
-      shell: pwsh
-      run: |
-        echo "::add-mask::${{ secrets.VNC_PASSWORD }}"
-        echo "::add-mask::${{ secrets.PAT }}"
+      - name: Mask sensitive values
+        shell: pwsh
+        run: |
+          echo "::add-mask::${{ secrets.VNC_PASSWORD }}"
+          echo "::add-mask::${{ secrets.NGROK_AUTH_TOKEN }}"
+          echo "::add-mask::${{ secrets.PAT }}"
 
-    - name: Get previous successful workflow run ID
-      id: get_previous_run
-      shell: pwsh
-      run: |
-        $url = "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=success&event=push&per_page=1"
-        $headers = @{
-          'Authorization' = "token ${{ secrets.PAT }}"
-          'Accept' = 'application/vnd.github.v3+json'
-        }
-        try {
-          $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
-          if ($response.workflow_runs.Count -gt 0) {
-            $runId = $response.workflow_runs[0].id
-            Write-Output "Previous successful run ID: $runId"
-            echo "prev_run_id=$runId" >> $env:GITHUB_OUTPUT
-          } else {
-            Write-Output "No previous successful run found."
+      - name: Get previous successful workflow run ID
+        id: get_previous_run
+        shell: pwsh
+        run: |
+          $url = "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=success&event=push&per_page=1"
+          $headers = @{
+            'Authorization' = "token ${{ secrets.PAT }}"
+            'Accept'        = 'application/vnd.github.v3+json'
+          }
+          try {
+            $response = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+            if ($response.workflow_runs.Count -gt 0) {
+              $runId = $response.workflow_runs[0].id
+              Write-Output "Previous successful run ID: $runId"
+              echo "prev_run_id=$runId" >> $env:GITHUB_OUTPUT
+            } else {
+              Write-Output "No previous successful run found."
+              echo "prev_run_id=0" >> $env:GITHUB_OUTPUT
+            }
+          } catch {
+            Write-Output "Error fetching previous run: $($_.Exception.Message)"
             echo "prev_run_id=0" >> $env:GITHUB_OUTPUT
           }
-        } catch {
-          Write-Output "Error fetching previous run: $($_.Exception.Message)"
-          echo "prev_run_id=0" >> $env:GITHUB_OUTPUT
-        }
-      env:
-        PAT: ${{ secrets.PAT }}
+        env:
+          PAT: ${{ secrets.PAT }}
 
-    - name: Download backup from previous run
-      uses: actions/download-artifact@v4.1.1
-      with:
-        name: windows-backup
-        run-id: ${{ steps.get_previous_run.outputs.prev_run_id }}
-        path: C:\
-      continue-on-error: true
+      - name: Download backup from previous run
+        uses: actions/download-artifact@v4.1.1
+        with:
+          name: windows-backup
+          run-id: ${{ steps.get_previous_run.outputs.prev_run_id }}
+          path: C:\
+        continue-on-error: true
 
-    - name: Restore backup
-      shell: pwsh
-      run: |
-        if (Test-Path "C:\backup.zip") {
-          Expand-Archive -Path "C:\backup.zip" -DestinationPath "C:\" -Force
-          Remove-Item "C:\backup.zip" -Force
-          Write-Output "Backup restored successfully"
-        } else {
-          Write-Output "No backup found, starting fresh"
-        }
-
-    - name: Create local admin user
-      shell: pwsh
-      run: |
-        $username = "$env:WINDOWS_USER"
-        
-        # Kiểm tra xem user đã tồn tại chưa
-        if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-          $password = ConvertTo-SecureString "SecurePassword123!" -AsPlainText -Force
-          New-LocalUser -Name $username -Password $password -FullName "GitHub Runner" -Description "Temporary admin user for VNC"
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Write-Output "Created user: $username"
-        } else {
-          Write-Output "User $username already exists"
-        }
-
-    - name: Disable Windows Firewall
-      shell: pwsh
-      run: |
-        Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
-
-    - name: Install TightVNC
-      shell: pwsh
-      run: |
-        try {
-          # Cài đặt TightVNC qua Chocolatey
-          choco install tightvnc -y --force
-          Write-Output "TightVNC installed successfully via Chocolatey"
-        } catch {
-          Write-Error "Failed to install TightVNC: $($_.Exception.Message)"
-          exit 1
-        }
-
-    - name: Set VNC password
-      shell: pwsh
-      env:
-        VNC_PASSWORD: "${{ secrets.VNC_PASSWORD }}"
-      run: |
-        # Thiết lập mật khẩu cho TightVNC
-        $vncPasswdPath = "$env:ProgramFiles\TightVNC\tvnserver.exe"
-        if (Test-Path $vncPasswdPath) {
-          # Sử dụng -controlservice -password để thiết lập mật khẩu
-          & "$vncPasswdPath" -controlservice -password $env:VNC_PASSWORD
-          Write-Output "VNC password set successfully"
-        } else {
-          Write-Error "TightVNC not found at $vncPasswdPath"
-          # Thử đường dẫn thay thế
-          $altPath = "${env:ProgramFiles(x86)}\TightVNC\tvnserver.exe"
-          if (Test-Path $altPath) {
-            & "$altPath" -controlservice -password $env:VNC_PASSWORD
-            Write-Output "VNC password set successfully from alternative path"
+      - name: Restore backup
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\backup.zip") {
+            Expand-Archive -Path "C:\backup.zip" -DestinationPath "C:\" -Force
+            Remove-Item "C:\backup.zip" -Force
+            Write-Output "Backup restored successfully"
           } else {
-            Write-Error "TightVNC not found at alternative path $altPath"
+            Write-Output "No backup found, starting fresh"
           }
-        }
 
-    - name: Configure TightVNC Server
-      shell: pwsh
-      run: |
-        # Cấu hình TightVNC Server
-        $vncServerPath = "$env:ProgramFiles\TightVNC\tvnserver.exe"
-        if (Test-Path $vncServerPath) {
-          # Cài đặt service
-          & "$vncServerPath" -install -silent
+      - name: Create local admin user
+        shell: pwsh
+        run: |
+          $username = "$env:WINDOWS_USER"
           
-          # Cấu hình thêm để cho phép kết nối từ xa
-          & "$vncServerPath" -controlservice -sharedisplay 1
-          & "$vncServerPath" -controlservice -allowloopback 1
-          
-          Write-Output "TightVNC service installed and configured successfully"
-        } else {
-          $altPath = "${env:ProgramFiles(x86)}\TightVNC\tvnserver.exe"
-          if (Test-Path $altPath) {
-            & "$altPath" -install -silent
-            & "$altPath" -controlservice -sharedisplay 1
-            & "$altPath" -controlservice -allowloopback 1
-            Write-Output "TightVNC service installed successfully from alternative path"
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            $password = ConvertTo-SecureString "SecurePassword123!" -AsPlainText -Force
+            New-LocalUser -Name $username -Password $password -FullName "GitHub Runner" -Description "Temporary admin user for VNC"
+            Add-LocalGroupMember -Group "Administrators" -Member $username
+            Write-Output "Created user: $username"
           } else {
-            Write-Error "TightVNC not found"
+            Write-Output "User $username already exists"
           }
-        }
 
-    - name: Start TightVNC Server
-      shell: pwsh
-      run: |
-        # Khởi động TightVNC service
-        try {
-          Start-Service -Name "tvnserver"
-          # Chờ service khởi động hoàn toàn
-          Start-Sleep -Seconds 5
-          Write-Output "TightVNC server started successfully"
-        } catch {
-          Write-Error "Failed to start TightVNC service: $($_.Exception.Message)"
-        }
+      - name: Disable Windows Firewall
+        shell: pwsh
+        run: |
+          Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
 
-    - name: Get public IP information
-      shell: pwsh
-      run: |
-        # Lấy thông tin IP public của runner
-        try {
-          $publicIP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing).Content
-          Write-Output "Public IP: $publicIP"
-          echo "public_ip=$publicIP" >> $env:GITHUB_OUTPUT
-        } catch {
-          Write-Output "Could not retrieve public IP"
-          echo "public_ip=unknown" >> $env:GITHUB_OUTPUT
-        }
-        
-        # Kiểm tra xem VNC server có đang lắng nghe trên port 5900 không
-        $vncListening = (Get-NetTCPConnection -LocalPort 5900 -ErrorAction SilentlyContinue) -ne $null
-        if ($vncListening) {
-          Write-Output "VNC server is listening on port 5900"
-          echo "vnc_ready=true" >> $env:GITHUB_OUTPUT
-        } else {
-          Write-Output "VNC server is not listening on port 5900"
-          echo "vnc_ready=false" >> $env:GITHUB_OUTPUT
-        }
-      id: network_info
+      - name: Install TightVNC
+        shell: pwsh
+        run: |
+          try {
+            choco install tightvnc -y --force
+            Write-Output "TightVNC installed successfully via Chocolatey"
+          } catch {
+            Write-Error "Failed to install TightVNC: $($_.Exception.Message)"
+            exit 1
+          }
 
-    - name: Display connection info
-      shell: pwsh
-      run: |
-        Write-Output "=== VNC CONNECTION INFORMATION ==="
-        Write-Output "Host: ${{ steps.network_info.outputs.public_ip }}"
-        Write-Output "Port: 5900"
-        Write-Output "Password: ***"  # Password đã được mask
-        Write-Output "Username: ${{ env.WINDOWS_USER }}"
-        Write-Output "=================================="
-        Write-Output ""
-        Write-Output "Note: Connection may be blocked by GitHub's network firewall"
-        Write-Output "Recommended: Use a VNC client that supports SSH tunneling"
-
-    - name: Keep alive for 6 hours
-      shell: pwsh
-      run: |
-        Write-Output "Remote desktop will be available for 6 hours"
-        
-        # Script keep-alive để duy trì kết nối
-        $keepAliveScript = @"
-        `$duration = 6 * 60 * 60  # 6 giờ
-        `$startTime = Get-Date
-        `$checkInterval = 300  # 5 phút
-        
-        while (((Get-Date) - `$startTime).TotalSeconds -lt `$duration) {
-            `$elapsed = [math]::Round(((Get-Date) - `$startTime).TotalSeconds)
-            `$remaining = `$duration - `$elapsed
-            `$hours = [math]::Floor(`$remaining / 3600)
-            `$minutes = [math]::Floor((`$remaining % 3600) / 60)
-            `$seconds = `$remaining % 60
-            
-            Write-Output "Keeping alive... Time remaining: `${hours}h `${minutes}m `${seconds}s"
-            
-            # Kiểm tra và khởi động lại VNC nếu cần
-            `$vncService = Get-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-            if (`$vncService.Status -ne "Running") {
-                try {
-                    Start-Service -Name "tvnserver"
-                    Write-Output "Restarted TightVNC service"
-                } catch {
-                    Write-Output "Failed to restart TightVNC service: `$(`$_.Exception.Message)"
-                }
+      - name: Set VNC password
+        shell: pwsh
+        env:
+          VNC_PASSWORD: "${{ secrets.VNC_PASSWORD }}"
+        run: |
+          $vncPasswdPath = "$env:ProgramFiles\TightVNC\tvnserver.exe"
+          if (Test-Path $vncPasswdPath) {
+            & "$vncPasswdPath" -controlservice -password $env:VNC_PASSWORD
+            Write-Output "VNC password set successfully"
+          } else {
+            $altPath = "${env:ProgramFiles(x86)}\TightVNC\tvnserver.exe"
+            if (Test-Path $altPath) {
+              & "$altPath" -controlservice -password $env:VNC_PASSWORD
+              Write-Output "VNC password set successfully from alternative path"
+            } else {
+              Write-Error "TightVNC not found"
             }
-            
-            Start-Sleep -Seconds `$checkInterval
-        }
-        
-        Write-Output "Keep-alive period completed"
-        "@
-        $keepAliveScript | Out-File -FilePath "C:\keep-alive.ps1" -Encoding UTF8
-        & "C:\keep-alive.ps1"
+          }
 
-    - name: Create backup
-      shell: pwsh
-      run: |
-        $backupFolders = @(
-          "$env:USERPROFILE\AppData",
-          "$env:USERPROFILE\Documents", 
-          "$env:USERPROFILE\Downloads",
-          "$env:USERPROFILE\LocalAppData"
-        )
-        Compress-Archive -Path $backupFolders -DestinationPath "C:\backup.zip" -CompressionLevel Optimal -Force
-        Write-Output "Backup created successfully"
+      - name: Configure TightVNC Server
+        shell: pwsh
+        run: |
+          $vncServerPath = "$env:ProgramFiles\TightVNC\tvnserver.exe"
+          if (Test-Path $vncServerPath) {
+            & "$vncServerPath" -install -silent
+            & "$vncServerPath" -controlservice -sharedisplay 1
+            & "$vncServerPath" -controlservice -allowloopback 1
+            Write-Output "TightVNC service installed and configured"
+          } else {
+            $altPath = "${env:ProgramFiles(x86)}\TightVNC\tvnserver.exe"
+            if (Test-Path $altPath) {
+              & "$altPath" -install -silent
+              & "$altPath" -controlservice -sharedisplay 1
+              & "$altPath" -controlservice -allowloopback 1
+              Write-Output "TightVNC service installed from alternative path"
+            } else {
+              Write-Error "TightVNC not found"
+            }
+          }
 
-    - name: Upload backup to artifact
-      uses: actions/upload-artifact@v4.3.1
-      with:
-        name: windows-backup
-        path: C:\backup.zip
-        retention-days: 7
+      - name: Start TightVNC Server
+        shell: pwsh
+        run: |
+          try {
+            Start-Service -Name "tvnserver"
+            Start-Sleep -Seconds 5
+            $service = Get-Service -Name "tvnserver"
+            if ($service.Status -eq "Running") {
+              Write-Output "TightVNC server started successfully"
+            } else {
+              Write-Error "TightVNC service failed to start"
+            }
+          } catch {
+            Write-Error "Failed to start TightVNC service: $($_.Exception.Message)"
+          }
 
-    - name: Cleanup
-      shell: pwsh
-      run: |
-        # Dừng các dịch vụ
-        Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-        
-        # Xóa file tạm
-        Remove-Item -Path "C:\backup.zip", "C:\keep-alive.ps1" -Force -ErrorAction SilentlyContinue
-        
-        Write-Output "Cleanup completed"
+      - name: Test VNC connection locally
+        shell: pwsh
+        run: |
+          try {
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $result = $tcpClient.BeginConnect("127.0.0.1", 5900, $null, $null)
+            $success = $result.AsyncWaitHandle.WaitOne(5000)
+            if ($success) {
+              $tcpClient.EndConnect($result)
+              Write-Output "VNC server is responding on localhost"
+              echo "vnc_local_test=success" >> $env:GITHUB_OUTPUT
+            } else {
+              Write-Output "VNC server is not responding on localhost"
+              echo "vnc_local_test=failed" >> $env:GITHUB_OUTPUT
+            }
+            $tcpClient.Close()
+          } catch {
+            Write-Output "Error testing VNC connection: $($_.Exception.Message)"
+            echo "vnc_local_test=error" >> $env:GITHUB_OUTPUT
+          }
+        id: vnc_test
+
+      - name: Install Ngrok
+        shell: pwsh
+        run: |
+          try {
+            $ngrokZip = "C:\ngrok.zip"
+            $ngrokDir = "C:\ngrok"
+            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip
+            Expand-Archive -Path $ngrokZip -DestinationPath $ngrokDir -Force
+            $env:Path += ";$ngrokDir"
+            [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$ngrokDir", "Machine")
+            Write-Output "Ngrok installed successfully"
+          } catch {
+            Write-Error "Failed to install Ngrok: $($_.Exception.Message)"
+            exit 1
+          }
+
+      - name: Configure Ngrok
+        shell: pwsh
+        env:
+          NGROK_AUTH_TOKEN: "${{ secrets.NGROK_AUTH_TOKEN }}"
+        run: |
+          ngrok authtoken $env:NGROK_AUTH_TOKEN
+          Write-Output "Ngrok authtoken configured"
+
+      - name: Start Ngrok tunnel
+        shell: pwsh
+        run: |
+          Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+          Start-Sleep -Seconds 10
+          Write-Output "Ngrok tunnel started"
+
+      - name: Get Ngrok connection info
+        shell: pwsh
+        run: |
+          $maxRetries = 15
+          $retryCount = 0
+          $success = $false
+          
+          while (-not $success -and $retryCount -lt $maxRetries) {
+            try {
+              $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 10).Content | ConvertFrom-Json
+              $vncUrl = $ngrokInfo.tunnels[0].public_url
+              $vncHost = $vncUrl -replace "tcp://", ""
+              $vncHost, $vncPort = $vncHost -split ":"
+              
+              Write-Output "VNC Connection URL: $vncUrl"
+              Write-Output "VNC Host: $vncHost"
+              Write-Output "VNC Port: $vncPort"
+              
+              echo "vnc_url=$vncUrl" >> $env:GITHUB_OUTPUT
+              echo "vnc_host=$vncHost" >> $env:GITHUB_OUTPUT
+              echo "vnc_port=$vncPort" >> $env:GITHUB_OUTPUT
+              echo "connection_method=ngrok" >> $env:GITHUB_OUTPUT
+              
+              $success = $true
+            } catch {
+              $retryCount++
+              Write-Output "Attempt $retryCount failed: $($_.Exception.Message)"
+              Start-Sleep -Seconds 3
+            }
+          }
+          
+          if (-not $success) {
+            Write-Output "Failed to get Ngrok connection info, using direct connection fallback"
+            try {
+              $publicIP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 10).Content
+              Write-Output "Public IP: $publicIP"
+              echo "vnc_url=tcp://$publicIP:5900" >> $env:GITHUB_OUTPUT
+              echo "vnc_host=$publicIP" >> $env:GITHUB_OUTPUT
+              echo "vnc_port=5900" >> $env:GITHUB_OUTPUT
+              echo "connection_method=direct" >> $env:GITHUB_OUTPUT
+            } catch {
+              Write-Output "Could not retrieve public IP either"
+              echo "connection_method=failed" >> $env:GITHUB_OUTPUT
+            }
+          }
+        id: connection_info
+
+      - name: Display connection info
+        shell: pwsh
+        run: |
+          Write-Output "=== VNC CONNECTION INFORMATION ==="
+          
+          if ("${{ steps.connection_info.outputs.connection_method }}" -eq "ngrok") {
+            Write-Output "Connection Method: Ngrok Tunnel"
+            Write-Output "URL: ${{ steps.connection_info.outputs.vnc_url }}"
+            Write-Output "Host: ${{ steps.connection_info.outputs.vnc_host }}"
+            Write-Output "Port: ${{ steps.connection_info.outputs.vnc_port }}"
+          } elseif ("${{ steps.connection_info.outputs.connection_method }}" -eq "direct") {
+            Write-Output "Connection Method: Direct Connection"
+            Write-Output "Host: ${{ steps.connection_info.outputs.vnc_host }}"
+            Write-Output "Port: ${{ steps.connection_info.outputs.vnc_port }}"
+            Write-Output "Note: Direct connection may be blocked by firewall"
+          } else {
+            Write-Output "Connection Method: Failed to establish"
+            Write-Output "Please check the workflow logs for details"
+          }
+          
+          Write-Output "Password: ***"
+          Write-Output "Username: ${{ env.WINDOWS_USER }}"
+          Write-Output "=================================="
+          
+          $connectionGuide = @"
+# Hướng dẫn kết nối VNC
+
+## Thông tin kết nối:
+${{ steps.connection_info.outputs.vnc_url }}
+
+## Hướng dẫn RealVNC:
+1. Mở RealVNC Viewer
+2. Nhập địa chỉ: ${{ steps.connection_info.outputs.vnc_url }}
+3. Nhập password khi được yêu cầu
+4. Username: ${{ env.WINDOWS_USER }}
+
+## Lưu ý:
+- Kết nối sẽ tự động đóng sau 6 giờ
+- Dữ liệu sẽ được backup tự động
+"@
+          
+          $connectionGuide | Out-File -FilePath "C:\connection_guide.txt" -Encoding UTF8
+
+      - name: Keep alive for 6 hours
+        shell: pwsh
+        run: |
+          Write-Output "Remote desktop will be available for 6 hours"
+          
+          $keepAliveScript = @"
+          `$duration = 6 * 60 * 60
+          `$startTime = Get-Date
+          `$checkInterval = 300
+          
+          while (((Get-Date) - `$startTime).TotalSeconds -lt `$duration) {
+              `$elapsed = [math]::Round(((Get-Date) - `$startTime).TotalSeconds)
+              `$remaining = `$duration - `$elapsed
+              `$hours = [math]::Floor(`$remaining / 3600)
+              `$minutes = [math]::Floor((`$remaining % 3600) / 60)
+              
+              Write-Output "Time remaining: `${hours}h `${minutes}m"
+              
+              # Kiểm tra VNC service
+              try {
+                  `$vncService = Get-Service -Name "tvnserver" -ErrorAction Stop
+                  if (`$vncService.Status -ne "Running") {
+                      Start-Service -Name "tvnserver"
+                      Write-Output "Restarted TightVNC service"
+                  }
+              } catch {
+                  Write-Output "VNC service issue: `$(`$_.Exception.Message)"
+              }
+              
+              # Kiểm tra Ngrok
+              try {
+                  `$ngrokProcess = Get-Process -Name "ngrok" -ErrorAction Stop
+                  `$tunnelActive = `$true
+                  try {
+                      `$ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 10).Content | ConvertFrom-Json
+                  } catch {
+                      `$tunnelActive = `$false
+                  }
+                  
+                  if (-not `$tunnelActive) {
+                      Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
+                      Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+                      Write-Output "Restarted Ngrok tunnel"
+                      Start-Sleep -Seconds 5
+                  }
+              } catch {
+                  Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+                  Write-Output "Started Ngrok process"
+                  Start-Sleep -Seconds 5
+              }
+              
+              Start-Sleep -Seconds `$checkInterval
+          }
+          
+          Write-Output "Session completed"
+"@
+          
+          $keepAliveScript | Out-File -FilePath "C:\keep-alive.ps1" -Encoding UTF8
+          & "C:\keep-alive.ps1"
+
+      - name: Create backup
+        shell: pwsh
+        run: |
+          $backupFolders = @(
+            "$env:USERPROFILE\AppData",
+            "$env:USERPROFILE\Documents", 
+            "$env:USERPROFILE\Downloads",
+            "$env:USERPROFILE\LocalAppData"
+          )
+          Compress-Archive -Path $backupFolders -DestinationPath "C:\backup.zip" -CompressionLevel Optimal -Force
+          Write-Output "Backup created successfully"
+
+      - name: Upload backup to artifact
+        uses: actions/upload-artifact@v4.3.1
+        with:
+          name: windows-backup
+          path: C:\backup.zip
+          retention-days: 7
+
+      - name: Cleanup
+        shell: pwsh
+        run: |
+          Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
+          Get-Process | Where-Object { $_.Name -like "*ngrok*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+          
+          Remove-Item -Path "C:\backup.zip", "C:\keep-alive.ps1", "C:\connection_guide.txt", "C:\ngrok.zip" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\ngrok" -Recurse -Force -ErrorAction SilentlyContinue
+          
+          Write-Output "Cleanup completed"
