@@ -1,5 +1,5 @@
-name: Windows VNC Remote Desktop
-run-name: Windows VNC Session by ${{ github.actor }}
+name: Windows VNC
+run-name: Windows VNC - ${{ github.actor }}
 
 on:
   workflow_dispatch:
