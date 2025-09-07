@@ -26,8 +26,6 @@ jobs:
         shell: pwsh
         run: |
           echo "::add-mask::${{ secrets.VNC_PASSWORD }}"
-          echo "::add-mask::${{ secrets.NGROK_AUTH_TOKEN }}"
-          echo "::add-mask::${{ secrets.NGROK_API_KEY }}"
           echo "::add-mask::${{ secrets.PAT }}"
 
       - name: Get previous successful workflow run ID
@@ -93,6 +91,32 @@ jobs:
         shell: pwsh
         run: |
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
+
+      - name: Disable Windows Defender Firewall
+        shell: pwsh
+        run: |
+          try {
+              # Disable Windows Defender Firewall for all profiles
+              Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction Stop
+              Write-Output "Windows Defender Firewall disabled successfully"
+          } catch {
+              Write-Output "Windows Defender Firewall disable failed: $($_.Exception.Message)"
+              # Try alternative method
+              try {
+                  netsh advfirewall set allprofiles state off
+                  Write-Output "Windows Defender Firewall disabled via netsh"
+              } catch {
+                  Write-Output "Alternative firewall disable also failed: $($_.Exception.Message)"
+              }
+          }
+
+          # Also disable Windows Defender real-time protection temporarily
+          try {
+              Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+              Write-Output "Windows Defender real-time protection disabled"
+          } catch {
+              Write-Output "Failed to disable Windows Defender real-time protection: $($_.Exception.Message)"
+          }
 
       - name: Install TightVNC
         shell: pwsh
@@ -183,42 +207,33 @@ jobs:
           }
         id: vnc_test
 
-      - name: Install Ngrok
+      - name: Install Cloudflare Tunnel
         shell: pwsh
         run: |
           try {
-              $ngrokZip = "C:\ngrok.zip"
-              $ngrokDir = "C:\ngrok"
+              $cloudflaredDir = "C:\cloudflared"
 
-              # Try primary download URL
-              try {
-                  Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip -TimeoutSec 30
-                  Write-Output "Downloaded Ngrok from primary URL"
-              } catch {
-                  Write-Output "Primary URL failed, trying alternative..."
-                  # Alternative download URL
-                  Invoke-WebRequest -Uri "https://ngrok.com/download/windows" -OutFile $ngrokZip -TimeoutSec 30
-                  Write-Output "Downloaded Ngrok from alternative URL"
-              }
+              # Download cloudflared
+              Write-Output "Downloading cloudflared..."
+              Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "C:\cloudflared.exe" -TimeoutSec 30
 
-              # Extract
-              if (Test-Path $ngrokZip) {
-                  Expand-Archive -Path $ngrokZip -DestinationPath $ngrokDir -Force
-                  Write-Output "Ngrok extracted successfully"
-              } else {
-                  throw "Download failed - zip file not found"
-              }
+              # Create directory and move executable
+              New-Item -ItemType Directory -Path $cloudflaredDir -Force
+              Move-Item -Path "C:\cloudflared.exe" -Destination "$cloudflaredDir\cloudflared.exe" -Force
+
+              # Add to PATH
+              $env:Path += ";$cloudflaredDir"
 
               # Verify installation
-              if (Test-Path "$ngrokDir\ngrok.exe") {
-                  Write-Output "Ngrok installed successfully at: $ngrokDir\ngrok.exe"
+              if (Test-Path "$cloudflaredDir\cloudflared.exe") {
+                  Write-Output "Cloudflared installed successfully"
                   # Test version
-                  & "$ngrokDir\ngrok.exe" --version
+                  & "$cloudflaredDir\cloudflared.exe" --version
               } else {
-                  throw "Ngrok executable not found after extraction"
+                  throw "Cloudflared executable not found"
               }
           } catch {
-              Write-Error "Failed to install Ngrok: $($_.Exception.Message)"
+              Write-Error "Failed to install Cloudflared: $($_.Exception.Message)"
               exit 1
           }
           
@@ -236,345 +251,164 @@ jobs:
               exit 1
           }
 
-      - name: Configure Ngrok
+      - name: Configure Cloudflare Tunnel
         shell: pwsh
-        env:
-          NGROK_AUTH_TOKEN: "${{ secrets.NGROK_AUTH_TOKEN }}"
-          NGROK_API_KEY: "${{ secrets.NGROK_API_KEY }}"
         run: |
-          # Thêm đường dẫn ngrok vào PATH cho phiên hiện tại
-          $ngrokDir = "C:\ngrok"
-          $env:Path += ";$ngrokDir"
+          # Add cloudflared to PATH
+          $cloudflaredDir = "C:\cloudflared"
+          $env:Path += ";$cloudflaredDir"
 
-          # Kiểm tra ngrok có tồn tại không
-          if (Test-Path "$ngrokDir\ngrok.exe") {
-              Write-Output "Ngrok found at: $ngrokDir\ngrok.exe"
+          # Verify cloudflared installation
+          if (Test-Path "$cloudflaredDir\cloudflared.exe") {
+              Write-Output "Cloudflared found at: $cloudflaredDir\cloudflared.exe"
 
-              # Stop any existing ngrok processes
-              Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-
-              # Configure authtoken
-              $authtokenOutput = & "$ngrokDir\ngrok.exe" authtoken $env:NGROK_AUTH_TOKEN 2>&1
-              Write-Output "Authtoken output: $authtokenOutput"
-
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Failed to set authtoken. Please verify NGROK_AUTH_TOKEN is valid."
-                  exit 1
-              }
-
-              Write-Output "Ngrok authtoken configured successfully"
-
-              # Configure API key if provided
-              if ($env:NGROK_API_KEY -and $env:NGROK_API_KEY -ne "") {
-                  Write-Output "Configuring Ngrok API key..."
-                  $apiKeyOutput = & "$ngrokDir\ngrok.exe" config add-api-key $env:NGROK_API_KEY 2>&1
-                  Write-Output "API key output: $apiKeyOutput"
-
-                  if ($LASTEXITCODE -eq 0) {
-                      Write-Output "Ngrok API key configured successfully"
-                  } else {
-                      Write-Output "Warning: Failed to configure API key, but continuing..."
-                  }
-              } else {
-                  Write-Output "No NGROK_API_KEY provided, using authtoken only"
-              }
-
-              # Verify config
-              $configOutput = & "$ngrokDir\ngrok.exe" config check 2>&1
-              Write-Output "Config check output: $configOutput"
-
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Config check failed. Authtoken may be invalid."
-                  exit 1
-              }
-
-              Write-Output "Ngrok config verified"
-
-              # Test authtoken by starting agent briefly
-              Write-Output "Testing authtoken by starting ngrok agent..."
-              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-              Start-Sleep -Seconds 5
-
-              try {
-                  $testResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
-                  Write-Output "✓ Authtoken test successful - agent can communicate with ngrok service"
-              } catch {
-                  Write-Output "⚠ Authtoken test failed: $($_.Exception.Message)"
-                  Write-Output "This may indicate an invalid NGROK_AUTH_TOKEN or network issues"
-              }
-
-              # Stop the test agent
-              Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+              # Test cloudflared
+              & "$cloudflaredDir\cloudflared.exe" version
+              Write-Output "Cloudflared is ready to create tunnels"
 
           } else {
-              Write-Error "Ngrok executable not found in $ngrokDir"
+              Write-Error "Cloudflared executable not found in $cloudflaredDir"
               exit 1
           }
 
       
-      - name: Verify Ngrok connectivity
+      - name: Create Cloudflare Tunnel
         shell: pwsh
         run: |
-          $env:Path += ";C:\ngrok"
-    
-          # Test ngrok version
-          & "C:\ngrok\ngrok.exe" --version
-          Write-Output "✓ Ngrok version check passed"
-    
-          # Test config
-          & "C:\ngrok\ngrok.exe" config check
-          Write-Output "✓ Ngrok config check passed"
-    
-      - name: Start Ngrok agent
-        shell: pwsh
-        run: |
-          $ngrokDir = "C:\ngrok"
-          # Đảm bảo thêm vào PATH cho phiên hiện tại
-          $env:Path += ";$ngrokDir"
+          $cloudflaredDir = "C:\cloudflared"
+          $env:Path += ";$cloudflaredDir"
 
-          # Kill any existing ngrok processes
-          Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+          # Kill any existing cloudflared processes
+          Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-          # Start ngrok agent without tunnel (will create via API)
-          Start-Process -FilePath "$ngrokDir\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
+          Write-Output "Starting Cloudflare tunnel for VNC port 5900..."
 
-          # Wait for ngrok agent to be ready
-          $maxWait = 10
+          # Start cloudflared tunnel
+          # This will create a tunnel accessible via trycloudflare.com
+          Start-Process -FilePath "$cloudflaredDir\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:5900 --logfile C:\cloudflared.log" -WindowStyle Hidden -RedirectStandardOutput "C:\cloudflared_output.txt"
+
+          Write-Output "Cloudflared tunnel started, waiting for connection URL..."
+
+          # Wait for the tunnel to establish and get the URL
+          $maxWait = 30
           $waitCount = 0
-          $ngrokReady = $false
+          $tunnelReady = $false
+          $connectionUrl = $null
 
-          while (-not $ngrokReady -and $waitCount -lt $maxWait) {
+          while (-not $tunnelReady -and $waitCount -lt $maxWait) {
             try {
-              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-              if ($response.StatusCode -eq 200) {
-                $ngrokReady = $true
-                Write-Output "✓ Ngrok agent is ready"
-                break
+              # Check if output file exists and contains the URL
+              if (Test-Path "C:\cloudflared_output.txt") {
+                $output = Get-Content "C:\cloudflared_output.txt" -Raw
+                # Look for the cloudflare URL in the output
+                $urlMatch = $output | Select-String -Pattern "https://[^\s]+\.trycloudflare\.com" -AllMatches
+                if ($urlMatch.Matches.Count -gt 0) {
+                  $connectionUrl = $urlMatch.Matches[0].Value
+                  $tunnelReady = $true
+                  Write-Output "✓ Cloudflare tunnel established!"
+                  Write-Output "Connection URL: $connectionUrl"
+                  break
+                }
+              }
+
+              # Also check the log file
+              if (Test-Path "C:\cloudflared.log") {
+                $logContent = Get-Content "C:\cloudflared.log" -Raw
+                $urlMatch = $logContent | Select-String -Pattern "https://[^\s]+\.trycloudflare\.com" -AllMatches
+                if ($urlMatch.Matches.Count -gt 0) {
+                  $connectionUrl = $urlMatch.Matches[0].Value
+                  $tunnelReady = $true
+                  Write-Output "✓ Cloudflare tunnel established!"
+                  Write-Output "Connection URL: $connectionUrl"
+                  break
+                }
               }
             } catch {
-              Write-Output "Waiting for ngrok agent to start... ($waitCount/$maxWait)"
-              Start-Sleep -Seconds 1
-              $waitCount++
+              # Ignore errors and continue waiting
+            }
+
+            if ($waitCount % 5 -eq 0) {
+              Write-Output "Waiting for tunnel... ($waitCount/$maxWait)"
+            }
+
+            Start-Sleep -Seconds 1
+            $waitCount++
+          }
+
+          if (-not $tunnelReady) {
+            Write-Output "Tunnel creation timed out, but continuing anyway..."
+            Write-Output "Check C:\cloudflared.log for connection details"
+          }
+
+          # Save connection URL for later steps
+          if ($connectionUrl) {
+            $connectionUrl | Out-File -FilePath "C:\tunnel_url.txt" -Encoding UTF8
+          }
+
+      - name: Get Cloudflare connection info
+        shell: pwsh
+        run: |
+          Write-Output "Retrieving Cloudflare tunnel connection information..."
+
+          $connectionUrl = $null
+
+          # First, try to read from the saved file
+          if (Test-Path "C:\tunnel_url.txt") {
+            $connectionUrl = Get-Content "C:\tunnel_url.txt" -Raw
+            Write-Output "Found saved connection URL: $connectionUrl"
+          }
+
+          # If not found, try to extract from log files
+          if (-not $connectionUrl) {
+            try {
+              if (Test-Path "C:\cloudflared.log") {
+                $logContent = Get-Content "C:\cloudflared.log" -Raw
+                $urlMatch = $logContent | Select-String -Pattern "https://[^\s]+\.trycloudflare\.com" -AllMatches
+                if ($urlMatch.Matches.Count -gt 0) {
+                  $connectionUrl = $urlMatch.Matches[0].Value
+                  Write-Output "Found connection URL in log: $connectionUrl"
+                }
+              }
+            } catch {
+              Write-Output "Could not read log file: $($_.Exception.Message)"
             }
           }
 
-          if (-not $ngrokReady) {
-            Write-Warning "Ngrok agent not responding, but continuing anyway"
+          # If still not found, try output file
+          if (-not $connectionUrl) {
+            try {
+              if (Test-Path "C:\cloudflared_output.txt") {
+                $outputContent = Get-Content "C:\cloudflared_output.txt" -Raw
+                $urlMatch = $outputContent | Select-String -Pattern "https://[^\s]+\.trycloudflare\.com" -AllMatches
+                if ($urlMatch.Matches.Count -gt 0) {
+                  $connectionUrl = $urlMatch.Matches[0].Value
+                  Write-Output "Found connection URL in output: $connectionUrl"
+                }
+              }
+            } catch {
+              Write-Output "Could not read output file: $($_.Exception.Message)"
+            }
+          }
+
+          # If we have a connection URL, parse it
+          if ($connectionUrl) {
+            Write-Output "✓ Cloudflare tunnel connection established"
+            Write-Output "Connection URL: $connectionUrl"
+
+            # For cloudflared, the URL is typically https://xxxxx.trycloudflare.com
+            # But for VNC (TCP), we need to convert it to the proper format
+            $vncUrl = $connectionUrl -replace "https://", "tcp://"
+
+            echo "vnc_url=$vncUrl" >> $env:GITHUB_OUTPUT
+            echo "vnc_host=$($connectionUrl -replace 'https://', '')" >> $env:GITHUB_OUTPUT
+            echo "vnc_port=5900" >> $env:GITHUB_OUTPUT
+            echo "connection_method=cloudflare" >> $env:GITHUB_OUTPUT
+
           } else {
-            Write-Output "Ngrok agent started successfully"
-          }
-
-      - name: Create Ngrok tunnel via API
-        shell: pwsh
-        run: |
-          $maxRetries = 5
-          $retryCount = 0
-          $tunnelCreated = $false
-
-          # First, check if API is accessible
-          Write-Output "Checking Ngrok API status..."
-          try {
-            $statusResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
-            Write-Output "✓ Ngrok API is accessible (Status: $($statusResponse.StatusCode))"
-          } catch {
-            Write-Output "⚠ Ngrok API not accessible: $($_.Exception.Message)"
-            Write-Output "Restarting Ngrok agent..."
-            Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-            Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-            Start-Sleep -Seconds 10
-          }
-
-          # Try API method with limited retries
-          while (-not $tunnelCreated -and $retryCount -lt 2) {
-            try {
-              Write-Output "Attempt $($retryCount + 1) to create tunnel via API..."
-
-              $tunnelConfig = @{
-                name = "vnc-tunnel"
-                proto = "tcp"
-                addr = "5900"
-              } | ConvertTo-Json
-
-              Write-Output "Tunnel config: $tunnelConfig"
-
-              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body $tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 15
-
-              if ($response.StatusCode -eq 201) {
-                Write-Output "✓ Ngrok tunnel created successfully via API"
-                $tunnelCreated = $true
-              } else {
-                Write-Output "Unexpected status code: $($response.StatusCode)"
-              }
-            } catch {
-              $retryCount++
-              $errorMsg = $_.Exception.Message
-              Write-Output "Failed to create tunnel (attempt $retryCount): $errorMsg"
-
-              # If it's a 502 error, try restarting the agent with longer wait
-              if ($errorMsg -like "*502*" -or $errorMsg -like "*Bad Gateway*") {
-                Write-Output "502 error detected, restarting Ngrok agent..."
-                Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-                Start-Sleep -Seconds 3
-                Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-                Start-Sleep -Seconds 10  # Longer wait for agent to be ready
-              } else {
-                Start-Sleep -Seconds 2
-              }
-            }
-          }
-
-          # If API still fails after 2 attempts, skip to fallback immediately
-          if (-not $tunnelCreated) {
-            Write-Output "API method failed after 2 attempts, proceeding to fallback..."
-          }
-
-          # Always attempt fallback if API didn't succeed
-          Write-Output "Proceeding with direct tunnel creation (most reliable method)..."
-          if (-not $tunnelCreated) {
-            Write-Output "Note: API method was attempted but will use proven direct method"
-          }
-            try {
-              # Fallback: Kill existing and start with direct tunnel
-              Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-              Start-Sleep -Seconds 3
-
-              # Start ngrok with direct tunnel creation (the reliable method)
-              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
-              Write-Output "Started ngrok with direct tunnel creation"
-
-              # Wait for tunnel to be established
-              $maxWait = 15  # Increased timeout
-              $waitCount = 0
-              $tunnelReady = $false
-
-              while (-not $tunnelReady -and $waitCount -lt $maxWait) {
-                try {
-                  $verifyResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
-                  $tunnels = ($verifyResponse.Content | ConvertFrom-Json).tunnels
-                  if ($tunnels.Count -gt 0) {
-                    $tunnelReady = $true
-                    Write-Output "✓ Direct tunnel created successfully"
-                    Write-Output "Tunnel details: $($tunnels[0].public_url)"
-                    break
-                  }
-                } catch {
-                  # Don't show waiting messages too frequently
-                  if ($waitCount % 5 -eq 0) {
-                    Write-Output "Waiting for direct tunnel... ($waitCount/$maxWait)"
-                  }
-                }
-                Start-Sleep -Seconds 1
-                $waitCount++
-              }
-
-              if (-not $tunnelReady) {
-                throw "Direct tunnel creation timed out after $maxWait seconds"
-              }
-            } catch {
-              Write-Error "Direct tunnel creation also failed: $($_.Exception.Message)"
-              Write-Output "Please verify:"
-              Write-Output "1. NGROK_AUTH_TOKEN is valid and current"
-              Write-Output "2. Network connectivity allows ngrok connections"
-              Write-Output "3. No firewall blocking ngrok"
-              exit 1
-            }
-
-      - name: Get Ngrok connection info
-        shell: pwsh
-        run: |
-          $maxRetries = 10
-          $retryCount = 0
-          $success = $false
-    
-          # Thêm ngrok vào PATH cho step này
-          $env:Path += ";C:\ngrok"
-    
-          while (-not $success -and $retryCount -lt $maxRetries) {
-            try {
-              Write-Output "Attempt $($retryCount + 1) to get ngrok info..."
-
-              # Kiểm tra ngrok process
-              $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
-              if (-not $ngrokProcess) {
-                Write-Output "Ngrok process not found, restarting agent..."
-                Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-                Start-Sleep -Seconds 5
-
-                # Recreate tunnel via API
-                $tunnelConfig = @{
-                  name = "vnc-tunnel"
-                  proto = "tcp"
-                  addr = "5900"
-                } | ConvertTo-Json
-
-                Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body $tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 10 | Out-Null
-                Start-Sleep -Seconds 3
-              }
-
-              $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
-
-              # Try to find the named tunnel first (API created), then fallback to any TCP tunnel
-              $vncTunnel = $ngrokInfo.tunnels | Where-Object { $_.name -eq "vnc-tunnel" }
-              if (-not $vncTunnel) {
-                # Fallback: look for any TCP tunnel
-                $vncTunnel = $ngrokInfo.tunnels | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
-                if (-not $vncTunnel) {
-                  throw "No TCP tunnel found"
-                }
-                Write-Output "Using fallback tunnel (direct creation)"
-              } else {
-                Write-Output "Using API-created tunnel"
-              }
-
-              $vncUrl = $vncTunnel.public_url
-              $vncHost = $vncUrl -replace "tcp://", ""
-              $vncHost, $vncPort = $vncHost -split ":"
-
-              Write-Output "✓ Ngrok tunnel active: $vncUrl"
-
-              echo "vnc_url=$vncUrl" >> $env:GITHUB_OUTPUT
-              echo "vnc_host=$vncHost" >> $env:GITHUB_OUTPUT
-              echo "vnc_port=$vncPort" >> $env:GITHUB_OUTPUT
-              echo "connection_method=ngrok" >> $env:GITHUB_OUTPUT
-
-              $success = $true
-
-            } catch {
-              $retryCount++
-              $errorMsg = $_.Exception.Message
-              Write-Output "Attempt $retryCount failed: $errorMsg"
-
-              # Nếu là lỗi connection refused, thử restart ngrok
-              if ($errorMsg -like "*actively refused*" -or $errorMsg -like "*cannot connect*") {
-                Write-Output "Restarting ngrok agent..."
-                Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-                Start-Sleep -Seconds 2
-                Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-                Start-Sleep -Seconds 5
-
-                # Recreate tunnel
-                try {
-                  $tunnelConfig = @{
-                    name = "vnc-tunnel"
-                    proto = "tcp"
-                    addr = "5900"
-                  } | ConvertTo-Json
-
-                  Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body $tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 10 | Out-Null
-                } catch {
-                  Write-Output "Failed to recreate tunnel: $($_.Exception.Message)"
-                }
-              }
-
-              Start-Sleep -Seconds 3
-            }
-          }
-    
-          if (-not $success) {
-            Write-Output "Failed to get Ngrok connection info after $maxRetries attempts, using direct connection fallback"
+            Write-Output "Could not find Cloudflare connection URL, using fallback"
             try {
               $publicIP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 10).Content
-              Write-Output "Public IP: $publicIP"
+              Write-Output "Public IP fallback: $publicIP"
               echo "vnc_url=tcp://$publicIP:5900" >> $env:GITHUB_OUTPUT
               echo "vnc_host=$publicIP" >> $env:GITHUB_OUTPUT
               echo "vnc_port=5900" >> $env:GITHUB_OUTPUT
@@ -591,11 +425,12 @@ jobs:
         run: |
           Write-Output "=== VNC CONNECTION INFORMATION ==="
           
-          if ("${{ steps.connection_info.outputs.connection_method }}" -eq "ngrok") {
-            Write-Output "Connection Method: Ngrok Tunnel"
+          if ("${{ steps.connection_info.outputs.connection_method }}" -eq "cloudflare") {
+            Write-Output "Connection Method: Cloudflare Tunnel"
             Write-Output "URL: ${{ steps.connection_info.outputs.vnc_url }}"
             Write-Output "Host: ${{ steps.connection_info.outputs.vnc_host }}"
             Write-Output "Port: ${{ steps.connection_info.outputs.vnc_port }}"
+            Write-Output "Note: Use the HTTPS URL in your VNC client"
           } elseif ("${{ steps.connection_info.outputs.connection_method }}" -eq "direct") {
             Write-Output "Connection Method: Direct Connection"
             Write-Output "Host: ${{ steps.connection_info.outputs.vnc_host }}"
@@ -621,6 +456,7 @@ jobs:
           2. Nhập địa chỉ: ${{ steps.connection_info.outputs.vnc_url }}
           3. Nhập password khi được yêu cầu
           4. Username: ${{ env.WINDOWS_USER }}
+          5. Note: Cloudflare tunnel may take a moment to connect
 
           ## Lưu ý:
           - Kết nối sẽ tự động đóng sau 6 giờ
@@ -658,64 +494,39 @@ jobs:
                   Write-Output "VNC service issue: `$(`$_.Exception.Message)"
               }
               
-              # Kiểm tra Ngrok
+              # Kiểm tra Cloudflared
               try {
-                  `$ngrokProcess = Get-Process -Name "ngrok" -ErrorAction Stop
-                  `$tunnelActive = `$true
-                  try {
-                      `$ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 10).Content | ConvertFrom-Json
-                      # Check for named tunnel first, then any TCP tunnel
-                      `$vncTunnel = `$ngrokInfo.tunnels | Where-Object { `$_.name -eq "vnc-tunnel" }
-                      if (-not `$vncTunnel) {
-                          `$vncTunnel = `$ngrokInfo.tunnels | Where-Object { `$_.proto -eq "tcp" } | Select-Object -First 1
-                      }
-                      if (-not `$vncTunnel) {
-                          `$tunnelActive = `$false
-                      }
-                  } catch {
-                      `$tunnelActive = `$false
-                  }
+                  `$cloudflaredProcess = Get-Process -Name "cloudflared" -ErrorAction Stop
+                  Write-Output "Cloudflared process is running"
 
-                  if (-not `$tunnelActive) {
-                      Write-Output "VNC tunnel not found, recreating..."
-                      try {
-                          `$tunnelConfig = @{
-                              name = "vnc-tunnel"
-                              proto = "tcp"
-                              addr = "5900"
-                          } | ConvertTo-Json
-
-                          Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body `$tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 10 | Out-Null
-                          Write-Output "Recreated Ngrok tunnel via API"
-                          Start-Sleep -Seconds 3
-                      } catch {
-                          Write-Output "Failed to recreate tunnel: `$(`$_.Exception.Message)"
-                          # Restart agent if API fails
-                          Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
-                          Start-Process -FilePath "ngrok" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-                          Start-Sleep -Seconds 5
-                          # Recreate tunnel
-                          `$tunnelConfig = @{
-                              name = "vnc-tunnel"
-                              proto = "tcp"
-                              addr = "5900"
-                          } | ConvertTo-Json
-                          Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body `$tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 10 | Out-Null
-                      }
+                  # Check if tunnel URL is still accessible
+                  if (Test-Path "C:\tunnel_url.txt") {
+                      `$savedUrl = Get-Content "C:\tunnel_url.txt" -Raw
+                      Write-Output "Tunnel URL still saved: `$savedUrl"
+                  } else {
+                      Write-Output "Tunnel URL file missing, tunnel may have disconnected"
                   }
               } catch {
-                  Write-Output "Ngrok process not found, restarting agent..."
-                  Start-Process -FilePath "ngrok" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
-                  Start-Sleep -Seconds 5
-                  # Create tunnel
-                  `$tunnelConfig = @{
-                      name = "vnc-tunnel"
-                      proto = "tcp"
-                      addr = "5900"
-                  } | ConvertTo-Json
-                  Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body `$tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 10 | Out-Null
-                  Write-Output "Started Ngrok agent and created tunnel"
-                  Start-Sleep -Seconds 3
+                  Write-Output "Cloudflared process not found, restarting tunnel..."
+                  try {
+                      # Restart cloudflared tunnel
+                      Start-Process -FilePath "C:\cloudflared\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:5900 --logfile C:\cloudflared.log" -WindowStyle Hidden -RedirectStandardOutput "C:\cloudflared_output.txt"
+                      Write-Output "Restarted Cloudflared tunnel"
+                      Start-Sleep -Seconds 10
+
+                      # Try to get the new URL
+                      if (Test-Path "C:\cloudflared_output.txt") {
+                          `$output = Get-Content "C:\cloudflared_output.txt" -Raw
+                          `$urlMatch = `$output | Select-String -Pattern "https://[^\s]+\.trycloudflare\.com" -AllMatches
+                          if (`$urlMatch.Matches.Count -gt 0) {
+                              `$newUrl = `$urlMatch.Matches[0].Value
+                              `$newUrl | Out-File -FilePath "C:\tunnel_url.txt" -Encoding UTF8
+                              Write-Output "New tunnel URL saved: `$newUrl"
+                          }
+                      }
+                  } catch {
+                      Write-Output "Failed to restart Cloudflared: `$(`$_.Exception.Message)"
+                  }
               }
               
               Start-Sleep -Seconds `$checkInterval
@@ -750,9 +561,9 @@ jobs:
         shell: pwsh
         run: |
           Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-          Get-Process | Where-Object { $_.Name -like "*ngrok*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-          
-          Remove-Item -Path "C:\backup.zip", "C:\keep-alive.ps1", "C:\connection_guide.txt", "C:\ngrok.zip" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\ngrok" -Recurse -Force -ErrorAction SilentlyContinue
+          Get-Process | Where-Object { $_.Name -like "*cloudflared*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+          Remove-Item -Path "C:\backup.zip", "C:\keep-alive.ps1", "C:\connection_guide.txt", "C:\cloudflared_output.txt", "C:\cloudflared.log", "C:\tunnel_url.txt" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\cloudflared" -Recurse -Force -ErrorAction SilentlyContinue
           
           Write-Output "Cleanup completed"
