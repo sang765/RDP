@@ -94,18 +94,16 @@ jobs:
       run: |
         Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
 
-    - name: Install TigerVNC via Winget
+    - name: Install TightVNC via Chocolatey
       shell: pwsh
       run: |
         try {
-          # Thử cài đặt qua Winget trước
-          winget install TigerVNC.TigerVNC -s winget --accept-package-agreements --accept-source-agreements
-          Write-Output "TigerVNC installed successfully via Winget"
+          # Cài đặt TightVNC qua Chocolatey
+          choco install tightvnc -y --force
+          Write-Output "TightVNC installed successfully via Chocolatey"
         } catch {
-          Write-Output "Winget installation failed, trying Chocolatey..."
-          # Nếu Winget thất bại, thử cài đặt qua Chocolatey
-          choco install tigervnc -y
-          Write-Output "TigerVNC installed successfully via Chocolatey"
+          Write-Error "Failed to install TightVNC: $($_.Exception.Message)"
+          exit 1
         }
 
     - name: Install Ngrok via Winget
@@ -124,64 +122,55 @@ jobs:
 
     - name: Set VNC password
       shell: pwsh
+      env:
+        VNC_PASSWORD: "${{ secrets.VNC_PASSWORD }}"
       run: |
-        # Tìm đường dẫn chính xác của vncpasswd.exe
-        $vncPasswdPath = (Get-Command vncpasswd.exe -ErrorAction SilentlyContinue).Source
-        if (-not $vncPasswdPath) {
-            # Thử tìm trong các đường dẫn phổ biến
-            $possiblePaths = @(
-                "$env:ProgramFiles\TigerVNC\vncpasswd.exe",
-                "${env:ProgramFiles(x86)}\TigerVNC\vncpasswd.exe",
-                "$env:ProgramFiles\RealVNC\vncpasswd.exe",
-                "$env:LOCALAPPDATA\Programs\TigerVNC\vncpasswd.exe",
-                "C:\tools\TigerVNC\vncpasswd.exe"
-            )
-        
-            foreach ($path in $possiblePaths) {
-                if (Test-Path $path) {
-                    $vncPasswdPath = $path
-                    break
-                }
-            }
-        }
-    
-        if ($vncPasswdPath) {
-            Write-Output "Found vncpasswd at: $vncPasswdPath"
-        
-            # Tạo file password
-            $tempPassFile = "C:\vncpass.txt"
-            echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII
-            echo "$env:VNC_PASSWORD" | Out-File -FilePath $tempPassFile -Encoding ASCII -Append
-        
-            # Thiết lập password
-            Get-Content $tempPassFile | & "$vncPasswdPath" -f
-            Remove-Item $tempPassFile -Force
-            Write-Output "VNC password set successfully"
+        # Thiết lập mật khẩu cho TightVNC
+        $vncPasswdPath = "$env:ProgramFiles\TightVNC\tvnserver.exe"
+        if (Test-Path $vncPasswdPath) {
+          # Sử dụng -controlservice -password để thiết lập mật khẩu
+          & "$vncPasswdPath" -controlservice -password $env:VNC_PASSWORD
+          Write-Output "VNC password set successfully"
         } else {
-            Write-Error "VNC password utility not found. Please check TigerVNC installation."
-            # Thử cài đặt lại TigerVNC
-            choco install tigervnc -y --force
-            $vncPasswdPath = "$env:ProgramFiles\TigerVNC\vncpasswd.exe"
-            if (Test-Path $vncPasswdPath) {
-                Write-Output "TigerVNC reinstalled successfully"
-            } else {
-                Write-Error "Failed to install TigerVNC"
-            }
+          Write-Error "TightVNC not found at $vncPasswdPath"
+          # Thử đường dẫn thay thế
+          $altPath = "${env:ProgramFiles(x86)}\TightVNC\tvnserver.exe"
+          if (Test-Path $altPath) {
+            & "$altPath" -controlservice -password $env:VNC_PASSWORD
+            Write-Output "VNC password set successfully from alternative path"
+          } else {
+            Write-Error "TightVNC not found at alternative path $altPath"
+          }
         }
 
-    - name: Start TigerVNC Server
+    - name: Configure TightVNC Server
       shell: pwsh
       run: |
-        # Khởi động VNC server
-        $vncServerPath = "$env:ProgramFiles\TigerVNC\vncserver.exe"
+        # Cấu hình TightVNC Server
+        $vncServerPath = "$env:ProgramFiles\TightVNC\tvnserver.exe"
         if (Test-Path $vncServerPath) {
           # Cài đặt service
-          & "$vncServerPath" -service -install
-          # Khởi động service
-          Start-Service -Name "tigervnc"
-          Write-Output "VNC server started successfully"
+          & "$vncServerPath" -install -silent
+          Write-Output "TightVNC service installed successfully"
         } else {
-          Write-Error "VNC server not found at $vncServerPath"
+          $altPath = "${env:ProgramFiles(x86)}\TightVNC\tvnserver.exe"
+          if (Test-Path $altPath) {
+            & "$altPath" -install -silent
+            Write-Output "TightVNC service installed successfully from alternative path"
+          } else {
+            Write-Error "TightVNC not found"
+          }
+        }
+
+    - name: Start TightVNC Server
+      shell: pwsh
+      run: |
+        # Khởi động TightVNC service
+        try {
+          Start-Service -Name "tvnserver"
+          Write-Output "TightVNC server started successfully"
+        } catch {
+          Write-Error "Failed to start TightVNC service: $($_.Exception.Message)"
         }
 
     - name: Configure Ngrok
@@ -196,7 +185,7 @@ jobs:
     - name: Expose VNC port with Ngrok
       shell: pwsh
       run: |
-        # Khởi động Ngrok để expose cổng VNC
+        # Khởi động Ngrok để expose cổng VNC (TightVNC mặc định dùng port 5900)
         Start-Process -FilePath "ngrok" -ArgumentList "tcp 5900 --log stdout" -WindowStyle Hidden
         Start-Sleep -Seconds 5  # Chờ Ngrok khởi động
 
@@ -268,13 +257,13 @@ jobs:
             Write-Output "Keeping alive... Time remaining: `${hours}h `${minutes}m `${seconds}s"
             
             # Kiểm tra và khởi động lại VNC nếu cần
-            `$vncService = Get-Service -Name "tigervnc" -ErrorAction SilentlyContinue
+            `$vncService = Get-Service -Name "tvnserver" -ErrorAction SilentlyContinue
             if (`$vncService.Status -ne "Running") {
                 try {
-                    Start-Service -Name "tigervnc"
-                    Write-Output "Restarted TigerVNC service"
+                    Start-Service -Name "tvnserver"
+                    Write-Output "Restarted TightVNC service"
                 } catch {
-                    Write-Output "Failed to restart TigerVNC service: `$(`$_.Exception.Message)"
+                    Write-Output "Failed to restart TightVNC service: `$(`$_.Exception.Message)"
                 }
             }
             
@@ -339,11 +328,10 @@ jobs:
       shell: pwsh
       run: |
         # Dừng các dịch vụ
-        Stop-Service -Name "tigervnc" -ErrorAction SilentlyContinue
+        Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
         Get-Process | Where-Object { $_.Name -like "*ngrok*" } | Stop-Process -Force -ErrorAction SilentlyContinue
         
         # Xóa file tạm
         Remove-Item -Path "C:\backup.zip", "C:\keep-alive.ps1" -Force -ErrorAction SilentlyContinue
         
         Write-Output "Cleanup completed"
-
