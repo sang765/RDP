@@ -237,19 +237,6 @@ jobs:
               exit 1
           }
           
-      - name: Verify Ngrok installation
-        shell: pwsh
-        run: |
-          $ngrokDir = "C:\ngrok"
-          if (Test-Path "$ngrokDir\ngrok.exe") {
-              Write-Output "✓ Ngrok executable found"
-              # Test chạy ngrok version
-              & "$ngrokDir\ngrok.exe" --version
-              Write-Output "✓ Ngrok version check passed"
-          } else {
-              Write-Error "✗ Ngrok executable not found"
-              exit 1
-          }
 
       - name: Configure Cloudflare Tunnel
         shell: pwsh
