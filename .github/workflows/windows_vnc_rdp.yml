@@ -252,12 +252,43 @@ jobs:
               Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
 
               # Configure authtoken
-              & "$ngrokDir\ngrok.exe" authtoken $env:NGROK_AUTH_TOKEN
+              $authtokenOutput = & "$ngrokDir\ngrok.exe" authtoken $env:NGROK_AUTH_TOKEN 2>&1
+              Write-Output "Authtoken output: $authtokenOutput"
+
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Failed to set authtoken. Please verify NGROK_AUTH_TOKEN is valid."
+                  exit 1
+              }
+
               Write-Output "Ngrok authtoken configured successfully"
 
               # Verify config
-              & "$ngrokDir\ngrok.exe" config check
+              $configOutput = & "$ngrokDir\ngrok.exe" config check 2>&1
+              Write-Output "Config check output: $configOutput"
+
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Config check failed. Authtoken may be invalid."
+                  exit 1
+              }
+
               Write-Output "Ngrok config verified"
+
+              # Test authtoken by starting agent briefly
+              Write-Output "Testing authtoken by starting ngrok agent..."
+              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
+              Start-Sleep -Seconds 5
+
+              try {
+                  $testResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
+                  Write-Output "✓ Authtoken test successful - agent can communicate with ngrok service"
+              } catch {
+                  Write-Output "⚠ Authtoken test failed: $($_.Exception.Message)"
+                  Write-Output "This may indicate an invalid NGROK_AUTH_TOKEN or network issues"
+              }
+
+              # Stop the test agent
+              Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+
           } else {
               Write-Error "Ngrok executable not found in $ngrokDir"
               exit 1
@@ -379,19 +410,39 @@ jobs:
             try {
               # Fallback: Kill existing and start with direct tunnel
               Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
-              Start-Sleep -Seconds 10
+              Start-Sleep -Seconds 2
 
-              # Verify tunnel is created
-              $verifyResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
-              $tunnels = ($verifyResponse.Content | ConvertFrom-Json).tunnels
-              if ($tunnels.Count -gt 0) {
-                Write-Output "✓ Fallback tunnel created successfully"
-              } else {
-                throw "No tunnels found after fallback"
+              # Start ngrok with direct tunnel creation
+              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+              Write-Output "Started ngrok with direct tunnel creation"
+
+              # Wait for tunnel to be established
+              $maxWait = 30
+              $waitCount = 0
+              $tunnelReady = $false
+
+              while (-not $tunnelReady -and $waitCount -lt $maxWait) {
+                try {
+                  $verifyResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
+                  $tunnels = ($verifyResponse.Content | ConvertFrom-Json).tunnels
+                  if ($tunnels.Count -gt 0) {
+                    $tunnelReady = $true
+                    Write-Output "✓ Fallback tunnel created successfully"
+                    break
+                  }
+                } catch {
+                  Write-Output "Waiting for direct tunnel... ($waitCount/$maxWait)"
+                }
+                Start-Sleep -Seconds 1
+                $waitCount++
+              }
+
+              if (-not $tunnelReady) {
+                throw "Direct tunnel creation timed out"
               }
             } catch {
-              Write-Error "Both API and fallback methods failed: $($_.Exception.Message)"
+              Write-Error "Both API and direct tunnel methods failed: $($_.Exception.Message)"
+              Write-Output "Please check your NGROK_AUTH_TOKEN secret and ensure it's valid."
               exit 1
             }
           }
