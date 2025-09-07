@@ -27,6 +27,7 @@ jobs:
         run: |
           echo "::add-mask::${{ secrets.VNC_PASSWORD }}"
           echo "::add-mask::${{ secrets.NGROK_AUTH_TOKEN }}"
+          echo "::add-mask::${{ secrets.NGROK_API_KEY }}"
           echo "::add-mask::${{ secrets.PAT }}"
 
       - name: Get previous successful workflow run ID
@@ -239,6 +240,7 @@ jobs:
         shell: pwsh
         env:
           NGROK_AUTH_TOKEN: "${{ secrets.NGROK_AUTH_TOKEN }}"
+          NGROK_API_KEY: "${{ secrets.NGROK_API_KEY }}"
         run: |
           # Thêm đường dẫn ngrok vào PATH cho phiên hiện tại
           $ngrokDir = "C:\ngrok"
@@ -261,6 +263,21 @@ jobs:
               }
 
               Write-Output "Ngrok authtoken configured successfully"
+
+              # Configure API key if provided
+              if ($env:NGROK_API_KEY -and $env:NGROK_API_KEY -ne "") {
+                  Write-Output "Configuring Ngrok API key..."
+                  $apiKeyOutput = & "$ngrokDir\ngrok.exe" config add-api-key $env:NGROK_API_KEY 2>&1
+                  Write-Output "API key output: $apiKeyOutput"
+
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Output "Ngrok API key configured successfully"
+                  } else {
+                      Write-Output "Warning: Failed to configure API key, but continuing..."
+                  }
+              } else {
+                  Write-Output "No NGROK_API_KEY provided, using authtoken only"
+              }
 
               # Verify config
               $configOutput = & "$ngrokDir\ngrok.exe" config check 2>&1
