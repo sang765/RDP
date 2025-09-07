@@ -1,12 +1,13 @@
-# Script cleanup
+
+# Script cleanup
 Write-Output "Starting cleanup process..."
 
 # Dừng các dịch vụ VNC và Ngrok
 try {
-    Stop-Service -Name "tigervnc" -ErrorAction SilentlyContinue
-    Write-Output "Stopped TigerVNC service"
+    Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
+    Write-Output "Stopped TightVNC service"
 } catch {
-    Write-Output "Failed to stop TigerVNC service: $($_.Exception.Message)"
+    Write-Output "Failed to stop TightVNC service: $($_.Exception.Message)"
 }
 
 try {
@@ -18,7 +19,7 @@ try {
 
 # Xóa file tạm
 $filesToRemove = @(
-    "C:\tigervnc.exe",
+    "C:\tightvnc.msi",
     "C:\ngrok.zip",
     "C:\backup.zip",
     "C:\keep-alive.ps1"

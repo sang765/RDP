@@ -14,18 +14,18 @@ if (-not (Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue)) {
     Write-Output "User $UserName already exists"
 }
 
-# Tải và cài đặt TigerVNC
-$vncInstallerPath = "$env:TEMP\tigervnc-installer.exe"
+# Tải và cài đặt TightVNC
+$vncInstallerPath = "$env:TEMP\tightvnc-installer.msi"
 try {
-    Invoke-WebRequest -Uri "https://sourceforge.net/projects/tigervnc/files/stable/1.13.1/tigervnc-64-1.13.1.exe/download" -OutFile $vncInstallerPath
-    Start-Process -FilePath $vncInstallerPath -ArgumentList "/S" -Wait
-    Write-Output "TigerVNC installed successfully"
+    Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.81/tightvnc-2.8.81-gpl-setup-64bit.msi" -OutFile $vncInstallerPath
+    Start-Process -FilePath "msiexec.exe" -ArgumentList "/i $vncInstallerPath /quiet /norestart" -Wait
+    Write-Output "TightVNC installed successfully"
 } catch {
-    Write-Error "Failed to install TigerVNC: $($_.Exception.Message)"
+    Write-Error "Failed to install TightVNC: $($_.Exception.Message)"
 }
 
 # Thiết lập VNC password
-$vncPasswdPath = "C:\Program Files\TigerVNC\vncpasswd.exe"
+$vncPasswdPath = "C:\Program Files\TightVNC\vncpasswd.exe"
 if (Test-Path $vncPasswdPath) {
     $tempPassFile = "$env:TEMP\vncpass.txt"
     try {
