@@ -243,12 +243,21 @@ jobs:
           # Thêm đường dẫn ngrok vào PATH cho phiên hiện tại
           $ngrokDir = "C:\ngrok"
           $env:Path += ";$ngrokDir"
-    
+
           # Kiểm tra ngrok có tồn tại không
           if (Test-Path "$ngrokDir\ngrok.exe") {
               Write-Output "Ngrok found at: $ngrokDir\ngrok.exe"
+
+              # Stop any existing ngrok processes
+              Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+              # Configure authtoken
               & "$ngrokDir\ngrok.exe" authtoken $env:NGROK_AUTH_TOKEN
               Write-Output "Ngrok authtoken configured successfully"
+
+              # Verify config
+              & "$ngrokDir\ngrok.exe" config check
+              Write-Output "Ngrok config verified"
           } else {
               Write-Error "Ngrok executable not found in $ngrokDir"
               exit 1
@@ -314,9 +323,22 @@ jobs:
           $retryCount = 0
           $tunnelCreated = $false
 
+          # First, check if API is accessible
+          Write-Output "Checking Ngrok API status..."
+          try {
+            $statusResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
+            Write-Output "✓ Ngrok API is accessible (Status: $($statusResponse.StatusCode))"
+          } catch {
+            Write-Output "⚠ Ngrok API not accessible: $($_.Exception.Message)"
+            Write-Output "Restarting Ngrok agent..."
+            Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
+            Start-Sleep -Seconds 10
+          }
+
           while (-not $tunnelCreated -and $retryCount -lt $maxRetries) {
             try {
-              Write-Output "Attempt $($retryCount + 1) to create tunnel..."
+              Write-Output "Attempt $($retryCount + 1) to create tunnel via API..."
 
               $tunnelConfig = @{
                 name = "vnc-tunnel"
@@ -324,22 +346,54 @@ jobs:
                 addr = "5900"
               } | ConvertTo-Json
 
-              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body $tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 10
+              Write-Output "Tunnel config: $tunnelConfig"
+
+              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -Method POST -Body $tunnelConfig -ContentType "application/json" -UseBasicParsing -TimeoutSec 15
 
               if ($response.StatusCode -eq 201) {
                 Write-Output "✓ Ngrok tunnel created successfully via API"
                 $tunnelCreated = $true
+              } else {
+                Write-Output "Unexpected status code: $($response.StatusCode)"
               }
             } catch {
               $retryCount++
-              Write-Output "Failed to create tunnel (attempt $retryCount): $($_.Exception.Message)"
-              Start-Sleep -Seconds 2
+              $errorMsg = $_.Exception.Message
+              Write-Output "Failed to create tunnel (attempt $retryCount): $errorMsg"
+
+              # If it's a 502 error, try restarting the agent
+              if ($errorMsg -like "*502*" -or $errorMsg -like "*Bad Gateway*") {
+                Write-Output "502 error detected, restarting Ngrok agent..."
+                Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+                Start-Sleep -Seconds 2
+                Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "start --none --log=stdout" -WindowStyle Hidden
+                Start-Sleep -Seconds 8
+              } else {
+                Start-Sleep -Seconds 2
+              }
             }
           }
 
           if (-not $tunnelCreated) {
-            Write-Error "Failed to create Ngrok tunnel after $maxRetries attempts"
-            exit 1
+            Write-Output "API method failed, falling back to direct tunnel creation..."
+            try {
+              # Fallback: Kill existing and start with direct tunnel
+              Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+              Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+              Start-Sleep -Seconds 10
+
+              # Verify tunnel is created
+              $verifyResponse = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5
+              $tunnels = ($verifyResponse.Content | ConvertFrom-Json).tunnels
+              if ($tunnels.Count -gt 0) {
+                Write-Output "✓ Fallback tunnel created successfully"
+              } else {
+                throw "No tunnels found after fallback"
+              }
+            } catch {
+              Write-Error "Both API and fallback methods failed: $($_.Exception.Message)"
+              exit 1
+            }
           }
 
       - name: Get Ngrok connection info
@@ -376,10 +430,17 @@ jobs:
 
               $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
 
-              # Find the vnc-tunnel
+              # Try to find the named tunnel first (API created), then fallback to any TCP tunnel
               $vncTunnel = $ngrokInfo.tunnels | Where-Object { $_.name -eq "vnc-tunnel" }
               if (-not $vncTunnel) {
-                throw "VNC tunnel not found"
+                # Fallback: look for any TCP tunnel
+                $vncTunnel = $ngrokInfo.tunnels | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
+                if (-not $vncTunnel) {
+                  throw "No TCP tunnel found"
+                }
+                Write-Output "Using fallback tunnel (direct creation)"
+              } else {
+                Write-Output "Using API-created tunnel"
               }
 
               $vncUrl = $vncTunnel.public_url
@@ -520,7 +581,11 @@ jobs:
                   `$tunnelActive = `$true
                   try {
                       `$ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 10).Content | ConvertFrom-Json
+                      # Check for named tunnel first, then any TCP tunnel
                       `$vncTunnel = `$ngrokInfo.tunnels | Where-Object { `$_.name -eq "vnc-tunnel" }
+                      if (-not `$vncTunnel) {
+                          `$vncTunnel = `$ngrokInfo.tunnels | Where-Object { `$_.proto -eq "tcp" } | Select-Object -First 1
+                      }
                       if (-not `$vncTunnel) {
                           `$tunnelActive = `$false
                       }

@@ -33,7 +33,11 @@ while (((Get-Date) - $startTime).TotalSeconds -lt $duration) {
         $tunnelExists = $true
         try {
             $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
+            # Check for named tunnel first, then any TCP tunnel
             $vncTunnel = $ngrokInfo.tunnels | Where-Object { $_.name -eq "vnc-tunnel" }
+            if (-not $vncTunnel) {
+                $vncTunnel = $ngrokInfo.tunnels | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
+            }
             if (-not $vncTunnel) {
                 $tunnelExists = $false
             }
