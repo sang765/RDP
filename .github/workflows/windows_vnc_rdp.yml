@@ -236,47 +236,119 @@ jobs:
               exit 1
           }
 
+      
+      - name: Verify Ngrok connectivity
+        shell: pwsh
+        run: |
+          $env:Path += ";C:\ngrok"
+    
+          # Test ngrok version
+          & "C:\ngrok\ngrok.exe" --version
+          Write-Output "✓ Ngrok version check passed"
+    
+          # Test config
+          & "C:\ngrok\ngrok.exe" config check
+          Write-Output "✓ Ngrok config check passed"
+    
       - name: Start Ngrok tunnel
         shell: pwsh
         run: |
           $ngrokDir = "C:\ngrok"
+          # Đảm bảo thêm vào PATH cho phiên hiện tại
+          $env:Path += ";$ngrokDir"
+    
+          # Kill any existing ngrok processes
+          Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+    
+          # Start ngrok với đúng đường dẫn
           Start-Process -FilePath "$ngrokDir\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
-          Start-Sleep -Seconds 10
-          Write-Output "Ngrok tunnel started"
+    
+          # Chờ lâu hơn và kiểm tra ngrok đã ready
+          $maxWait = 30
+          $waitCount = 0
+          $ngrokReady = $false
+    
+          while (-not $ngrokReady -and $waitCount -lt $maxWait) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+              if ($response.StatusCode -eq 200) {
+                $ngrokReady = $true
+                Write-Output "✓ Ngrok API is ready"
+                break
+              }
+            } catch {
+              Write-Output "Waiting for ngrok to start... ($waitCount/$maxWait)"
+              Start-Sleep -Seconds 1
+              $waitCount++
+            }
+          }
+    
+          if (-not $ngrokReady) {
+            Write-Warning "Ngrok API not responding, but continuing anyway"
+          } else {
+            Write-Output "Ngrok tunnel started successfully"
+          }
 
       - name: Get Ngrok connection info
         shell: pwsh
         run: |
-          $maxRetries = 15
+          $maxRetries = 10
           $retryCount = 0
           $success = $false
-          
+    
+          # Thêm ngrok vào PATH cho step này
+          $env:Path += ";C:\ngrok"
+    
           while (-not $success -and $retryCount -lt $maxRetries) {
             try {
-              $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 10).Content | ConvertFrom-Json
+              Write-Output "Attempt $($retryCount + 1) to get ngrok info..."
+        
+              # Kiểm tra ngrok process
+              $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+              if (-not $ngrokProcess) {
+                Write-Output "Ngrok process not found, restarting..."
+                Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+                Start-Sleep -Seconds 3
+              }
+        
+              $ngrokInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
+        
+              if ($ngrokInfo.tunnels.Count -eq 0) {
+                throw "No tunnels found"
+              }
+        
               $vncUrl = $ngrokInfo.tunnels[0].public_url
               $vncHost = $vncUrl -replace "tcp://", ""
               $vncHost, $vncPort = $vncHost -split ":"
-              
-              Write-Output "VNC Connection URL: $vncUrl"
-              Write-Output "VNC Host: $vncHost"
-              Write-Output "VNC Port: $vncPort"
-              
+        
+              Write-Output "✓ Ngrok tunnel active: $vncUrl"
+        
               echo "vnc_url=$vncUrl" >> $env:GITHUB_OUTPUT
               echo "vnc_host=$vncHost" >> $env:GITHUB_OUTPUT
               echo "vnc_port=$vncPort" >> $env:GITHUB_OUTPUT
               echo "connection_method=ngrok" >> $env:GITHUB_OUTPUT
-              
+        
               $success = $true
+        
             } catch {
               $retryCount++
-              Write-Output "Attempt $retryCount failed: $($_.Exception.Message)"
+              $errorMsg = $_.Exception.Message
+              Write-Output "Attempt $retryCount failed: $errorMsg"
+        
+              # Nếu là lỗi connection refused, thử restart ngrok
+              if ($errorMsg -like "*actively refused*" -or $errorMsg -like "*cannot connect*") {
+                Write-Output "Restarting ngrok process..."
+                Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+                Start-Sleep -Seconds 2
+                Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 5900 --log=stdout" -WindowStyle Hidden
+              }
+        
               Start-Sleep -Seconds 3
             }
           }
-          
+    
           if (-not $success) {
-            Write-Output "Failed to get Ngrok connection info, using direct connection fallback"
+            Write-Output "Failed to get Ngrok connection info after $maxRetries attempts, using direct connection fallback"
             try {
               $publicIP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 10).Content
               Write-Output "Public IP: $publicIP"
